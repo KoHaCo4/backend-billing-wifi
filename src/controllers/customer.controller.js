@@ -66,7 +66,7 @@ class CustomerController {
           expired_at,
           status: status || "active",
         },
-        adminId
+        adminId,
       );
 
       console.log("✅ Customer created successfully:", customer.id);
@@ -224,7 +224,7 @@ class CustomerController {
           expired_at,
           status: status || "active",
         },
-        adminId
+        adminId,
       );
 
       console.log("✅ UPDATE CUSTOMER SUCCESS:", { id });
@@ -266,7 +266,7 @@ class CustomerController {
       const adminId = req.user.id;
 
       console.log(
-        `🔍 Attempting to delete customer ID: ${id}, adminId: ${adminId}`
+        `🔍 Attempting to delete customer ID: ${id}, adminId: ${adminId}`,
       );
 
       const result = await CustomerService.deleteCustomer(id, adminId);
@@ -305,13 +305,13 @@ class CustomerController {
       const adminId = req.user.id;
 
       console.log(
-        `🚫 Deactivate customer request for ID: ${id}, Reason: ${reason}`
+        `🚫 Deactivate customer request for ID: ${id}, Reason: ${reason}`,
       );
 
       const result = await CustomerService.deactivateCustomer(
         id,
         adminId,
-        reason
+        reason,
       );
 
       res.json({
@@ -383,13 +383,13 @@ class CustomerController {
       const adminId = req.user.id;
 
       console.log(
-        `🚫 Suspend customer ${id}, reason: ${reason || "Not specified"}`
+        `🚫 Suspend customer ${id}, reason: ${reason || "Not specified"}`,
       );
 
       const result = await SuspensionService.suspendCustomer(
         id,
         adminId,
-        reason || "Suspended by admin"
+        reason || "Suspended by admin",
       );
 
       res.json({
@@ -429,13 +429,13 @@ class CustomerController {
       const adminId = req.user.id;
 
       console.log(
-        `🔄 Activate customer ${id}, reason: ${reason || "Not specified"}`
+        `🔄 Activate customer ${id}, reason: ${reason || "Not specified"}`,
       );
 
       const result = await SuspensionService.reactivateCustomer(
         id,
         adminId,
-        reason || "Activated by admin"
+        reason || "Activated by admin",
       );
 
       res.json({

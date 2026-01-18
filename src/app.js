@@ -16,6 +16,9 @@ const statsRoutes = require("./routes/stats.routes");
 const suspensionRoutes = require("./routes/suspension.routes");
 const testRoutes = require("./routes/test.routes");
 const healtRoutes = require("./routes/health.routes");
+const settingsRoutes = require("./routes/settings.routes");
+const dashboardRoutes = require("./routes/dashboard.routes");
+const paymentRoutes = require("./routes/payment.routes");
 
 const app = express();
 
@@ -25,7 +28,7 @@ app.use(
   cors({
     origin: process.env.FRONTEND_URL || "http://localhost:3000",
     credentials: true,
-  })
+  }),
 );
 
 // Logging
@@ -46,6 +49,9 @@ app.use("/api/invoices", invoiceRoutes);
 app.use("/api/stats", statsRoutes);
 app.use("/api/suspension", suspensionRoutes);
 app.use("/api/health", healtRoutes);
+app.use("/api/settings", settingsRoutes);
+app.use("/api/dashboard", dashboardRoutes);
+app.use("/api/payments", paymentRoutes);
 // Tambahkan di app.js setelah routes lainnya
 app.use("/api/test", testRoutes);
 

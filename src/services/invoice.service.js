@@ -3,13 +3,21 @@ const InvoiceUtils = require("../utils/invoice");
 const logger = require("../utils/logger");
 const SuspensionService = require("./suspension.service");
 
+let ActivityLogService;
+try {
+  ActivityLogService = require("./activity-log.service");
+} catch (error) {
+  console.warn("⚠️ ActivityLogService not found, logging will be skipped");
+  ActivityLogService = null;
+}
+
 class InvoiceService {
   // Create invoice untuk customer extension
   static async createInvoiceForExtension(
     customerId,
     subscriptionId,
     amount,
-    adminId = 0
+    adminId = 0,
   ) {
     const connection = await db.getConnection();
 
@@ -19,10 +27,10 @@ class InvoiceService {
       // Get customer info
       const [customers] = await connection.query(
         `SELECT c.*, p.name as package_name, p.duration_days 
-         FROM customers c 
-         JOIN packages p ON c.package_id = p.id 
-         WHERE c.id = ?`,
-        [customerId]
+       FROM customers c 
+       JOIN packages p ON c.package_id = p.id 
+       WHERE c.id = ?`,
+        [customerId],
       );
 
       if (customers.length === 0) throw new Error("Customer not found");
@@ -34,20 +42,29 @@ class InvoiceService {
       const issueDate = new Date().toISOString().split("T")[0];
       const dueDate = InvoiceUtils.calculateDueDate(issueDate, 7);
 
-      // Create invoice
+      // PERBAIKAN: Tambahkan subtotal, tax_amount, discount_amount
+      const subtotal = parseFloat(amount) || 0;
+      const taxAmount = 0;
+      const discountAmount = 0;
+
+      // Create invoice dengan field lengkap
       const [invoiceResult] = await connection.query(
         `INSERT INTO invoices 
-         (invoice_number, customer_id, subscription_id, amount, description, status, issue_date, due_date) 
-         VALUES (?, ?, ?, ?, ?, 'pending', ?, ?)`,
+       (invoice_number, customer_id, subscription_id, subtotal, tax_amount, discount_amount,
+        amount, description, status, issue_date, due_date, created_at, updated_at) 
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, NOW(), NOW())`,
         [
           invoiceNumber,
           customerId,
           subscriptionId,
+          subtotal, // subtotal
+          taxAmount, // tax_amount
+          discountAmount, // discount_amount
           amount,
           `Pembayaran paket ${customer.package_name} (${customer.duration_days} hari)`,
           issueDate,
           dueDate,
-        ]
+        ],
       );
 
       const invoiceId = invoiceResult.insertId;
@@ -56,7 +73,7 @@ class InvoiceService {
       if (subscriptionId) {
         await connection.query(
           "UPDATE subscriptions SET invoice_id = ? WHERE id = ?",
-          [invoiceId, subscriptionId]
+          [invoiceId, subscriptionId],
         );
       }
 
@@ -73,7 +90,7 @@ class InvoiceService {
           `Invoice ${invoiceNumber} created for customer ${customer.name}`,
           source,
           adminId === 0 ? null : adminId,
-        ]
+        ],
       );
 
       await connection.commit();
@@ -99,66 +116,75 @@ class InvoiceService {
   }
 
   // Create manual invoice
-  static async createManualInvoice(data, adminId) {
-    const connection = await db.getConnection();
-
+  static async createManualInvoice(invoiceData, items = []) {
     try {
-      await connection.beginTransaction();
+      console.log("📦 Creating invoice with data:", invoiceData);
 
-      // Generate invoice number
-      const invoiceNumber = await InvoiceUtils.generateInvoiceNumber();
-      const issueDate = new Date().toISOString().split("T")[0];
-      const dueDate = InvoiceUtils.calculateDueDate(issueDate, 7);
-
-      // Create invoice
-      const [invoiceResult] = await connection.query(
-        `INSERT INTO invoices 
-         (invoice_number, customer_id, subscription_id, amount, description, status, issue_date, due_date) 
-         VALUES (?, ?, ?, ?, ?, 'pending', ?, ?)`,
-        [
-          invoiceNumber,
-          data.customer_id,
-          data.subscription_id || null,
-          data.amount,
-          data.description || "Manual invoice",
-          issueDate,
-          dueDate,
-        ]
+      // Double check customer exists
+      const [customerRows] = await db.query(
+        "SELECT id, name, phone FROM customers WHERE id = ?",
+        [invoiceData.customer_id],
       );
 
-      const invoiceId = invoiceResult.insertId;
+      if (customerRows.length === 0) {
+        throw new Error(
+          `Customer with ID ${invoiceData.customer_id} not found`,
+        );
+      }
+
+      console.log(`✅ Confirmed customer: ${customerRows[0].name}`);
+
+      // Insert invoice
+      const invoiceId = await InvoiceUtils.insertInvoice(invoiceData);
 
       // Log activity
-      await connection.query(
-        `INSERT INTO logs (action, entity, entity_id, invoice_id, description, source, admin_id) 
-         VALUES (?, ?, ?, ?, ?, ?, ?)`,
-        [
-          "create_invoice",
-          "invoice",
-          invoiceId,
-          invoiceId,
-          `Manual invoice ${invoiceNumber} created`,
-          "admin",
-          adminId,
-        ]
-      );
+      await ActivityLogService.logActivity({
+        action: "create",
+        entity: "invoice",
+        entity_id: invoiceId,
+        invoice_id: invoiceId,
+        description: `Created invoice ${invoiceData.invoice_number} for ${customerRows[0].name}`,
+        source: "system",
+      });
 
-      await connection.commit();
+      // Jika ada items, simpan ke invoice_items (jika diperlukan)
+      if (items && items.length > 0) {
+        await this.saveInvoiceItems(invoiceId, items);
+      }
 
       return {
         id: invoiceId,
-        invoice_number: invoiceNumber,
-        ...data,
-        issue_date: issueDate,
-        due_date: dueDate,
-        status: "pending",
+        invoice_number: invoiceData.invoice_number,
+        customer_id: invoiceData.customer_id,
+        created_by: invoiceData.created_by,
+        amount: invoiceData.amount,
+        message: "Invoice created successfully",
       };
     } catch (error) {
-      await connection.rollback();
-      logger.error("Create manual invoice error:", error);
+      console.error("Create manual invoice error:", error);
       throw error;
-    } finally {
-      connection.release();
+    }
+  }
+
+  static async saveInvoiceItems(invoiceId, items) {
+    try {
+      for (const item of items) {
+        await db.query(
+          `INSERT INTO invoice_items (invoice_id, description, quantity, unit_price, amount, created_at) 
+           VALUES (?, ?, ?, ?, ?, NOW())`,
+          [
+            invoiceId,
+            item.description,
+            item.quantity || 1,
+            item.unit_price,
+            item.amount || item.unit_price * (item.quantity || 1),
+          ],
+        );
+      }
+      console.log(`✅ Saved ${items.length} invoice items`);
+    } catch (error) {
+      console.error("Save invoice items error:", error);
+      // Jangan throw error agar invoice tetap tersimpan
     }
   }
 
@@ -210,13 +236,13 @@ class InvoiceService {
          ${whereClause}
          ORDER BY i.issue_date DESC
          LIMIT ? OFFSET ?`,
-        [...params, parseInt(limit), parseInt(offset)]
+        [...params, parseInt(limit), parseInt(offset)],
       );
 
       // Get total count
       const [[{ total }]] = await db.query(
         `SELECT COUNT(*) as total FROM invoices i ${whereClause}`,
-        params
+        params,
       );
 
       return {
@@ -250,7 +276,7 @@ class InvoiceService {
          JOIN customers c ON i.customer_id = c.id
          LEFT JOIN subscriptions s ON i.subscription_id = s.id
          WHERE i.id = ?`,
-        [id]
+        [id],
       );
 
       if (invoices.length === 0) {
@@ -262,13 +288,13 @@ class InvoiceService {
       // Get payments for this invoice
       const [payments] = await db.query(
         "SELECT * FROM payments WHERE invoice_id = ? ORDER BY created_at DESC",
-        [id]
+        [id],
       );
 
       invoice.payments = payments;
       invoice.paid_amount = payments.reduce(
         (sum, payment) => sum + parseFloat(payment.amount),
-        0
+        0,
       );
       invoice.balance = invoice.amount - invoice.paid_amount;
       invoice.is_paid = invoice.paid_amount >= invoice.amount;
@@ -285,70 +311,46 @@ class InvoiceService {
 
   // Process payment
   static async processPayment(invoiceId, paymentData, adminId) {
-    const connection = await db.getConnection();
+    let connection;
 
     try {
+      connection = await db.getConnection();
       await connection.beginTransaction();
 
       console.log(`💳 Processing payment for invoice ID: ${invoiceId}`);
 
-      // 1. Get invoice with ALL necessary data
+      // 1. Get invoice
       const [invoices] = await connection.query(
-        `SELECT i.*, 
-              c.id as customer_id, 
-              c.expired_at as current_customer_expired, 
-              c.package_id as customer_package_id,
-              c.status as customer_status,
-              c.auto_renew,
-              p.id as package_id, 
-              p.duration_days, 
-              p.name as package_name,
-              p.price as package_price
+        `SELECT i.*, c.id as customer_id, c.name as customer_name, c.expired_at as customer_expired,
+              c.package_id, p.duration_days
        FROM invoices i
        JOIN customers c ON i.customer_id = c.id
-       JOIN packages p ON c.package_id = p.id
+       LEFT JOIN packages p ON c.package_id = p.id
        WHERE i.id = ?`,
-        [invoiceId]
+        [invoiceId],
       );
 
-      if (invoices.length === 0) {
-        throw new Error("Invoice not found");
-      }
-
+      if (invoices.length === 0) throw new Error("Invoice not found");
       const invoice = invoices[0];
-      const customerId = invoice.customer_id;
-      const packageId = invoice.customer_package_id || invoice.package_id;
-      const durationDays = invoice.duration_days;
 
-      console.log("📋 Invoice debug data:", {
-        invoice_id: invoice.id,
-        invoice_number: invoice.invoice_number,
-        customer_id: customerId,
-        package_id: packageId,
-        duration_days: durationDays,
-        current_expired: invoice.current_customer_expired,
-        invoice_amount: invoice.amount,
-        package_price: invoice.package_price,
-      });
+      // Validasi
+      if (invoice.status === "paid") throw new Error("Invoice already paid");
+      if (invoice.status === "cancelled")
+        throw new Error("Invoice is cancelled");
 
-      // 2. Check if invoice is already paid
-      if (invoice.status === "paid") {
-        throw new Error("Invoice is already paid");
-      }
-
-      // 3. Check payment amount
-      const invoiceAmount = parseFloat(invoice.amount);
       const paymentAmount = parseFloat(paymentData.amount);
+      const invoiceAmount = parseFloat(invoice.amount);
 
-      if (paymentAmount <= 0) {
+      if (paymentAmount <= 0)
         throw new Error("Payment amount must be greater than 0");
-      }
-
-      if (paymentAmount > invoiceAmount) {
+      if (paymentAmount > invoiceAmount)
         throw new Error("Payment amount exceeds invoice amount");
-      }
 
-      // 4. Insert payment record
+      // 2. Buat payment record (tanpa customer_id)
+      const paymentRef =
+        paymentData.reference ||
+        `PAY-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+
       const [paymentResult] = await connection.query(
         `INSERT INTO payments (invoice_id, amount, payment_method, reference, notes, created_at)
        VALUES (?, ?, ?, ?, ?, NOW())`,
@@ -356,195 +358,241 @@ class InvoiceService {
           invoiceId,
           paymentAmount,
           paymentData.payment_method,
-          paymentData.reference || null,
-          paymentData.notes || null,
-        ]
+          paymentRef,
+          paymentData.notes || "Payment via dashboard",
+        ],
       );
 
-      // 5. Update invoice status
-      await connection.query(
-        `UPDATE invoices SET status = 'paid', paid_date = NOW() WHERE id = ?`,
-        [invoiceId]
-      );
-
-      // ============================================
-      // 6. EXTEND CUSTOMER EXPIRED DATE
-      // ============================================
-      if (packageId && durationDays) {
-        console.log(`🔄 Extending customer ${customerId} subscription...`);
-
-        // Dapatkan tanggal expired saat ini
-        const [customerData] = await connection.query(
-          `SELECT expired_at FROM customers WHERE id = ?`,
-          [customerId]
-        );
-
-        const currentExpired = customerData[0]?.expired_at
-          ? new Date(customerData[0].expired_at)
-          : new Date(); // Jika null, gunakan hari ini
-
-        const today = new Date();
-
-        console.log(`📅 Dates debug:`, {
-          today: today.toISOString().split("T")[0],
-          current_expired: currentExpired.toISOString().split("T")[0],
-          duration_days: durationDays,
-        });
-
-        // Tentukan tanggal expired baru
-        let newExpiredDate;
-
-        // Jika sudah expired atau expired hari ini, mulai dari hari ini
-        if (currentExpired <= today) {
-          newExpiredDate = new Date(today);
-          console.log(
-            `📅 Customer expired or expiring today, starting from today`
-          );
-        } else {
-          // Jika masih aktif, tambah dari tanggal expired yang lama
-          newExpiredDate = new Date(currentExpired);
-          console.log(
-            `📅 Customer still active, extending from current expired date`
-          );
-        }
-
-        // Cek jika customer dalam status suspended
-        if (customer.status === "suspended") {
-          console.log(`🔄 Reactivating suspended customer ${customerId}`);
-
-          // Reactivate customer (enable PPPoE)
-          await SuspensionService.reactivateCustomer(
-            customerId,
-            adminId,
-            "Reactivated: Invoice paid"
-          );
-        }
-
-        // Tambahkan durasi package
-        newExpiredDate.setDate(newExpiredDate.getDate() + durationDays);
-
-        const newExpiredDateStr = newExpiredDate.toISOString().split("T")[0];
-        console.log(`📅 New expired date: ${newExpiredDateStr}`);
-
-        // Update expired_at di customer
+      // 3. Update invoice status - HINDARI mengisi paid_by jika ada constraint error
+      try {
         await connection.query(
-          `UPDATE customers SET expired_at = ?, status = 'active' WHERE id = ?`,
-          [newExpiredDateStr, customerId]
+          `UPDATE invoices SET
+          status = 'paid',
+          paid_date = NOW(),
+          payment_method = ?,
+          reference_number = ?,
+          payment_notes = ?,
+          updated_at = NOW()
+         WHERE id = ?`,
+          [
+            paymentData.payment_method,
+            paymentRef,
+            paymentData.notes || "Payment via dashboard",
+            invoiceId,
+          ],
         );
-
-        // 7. Buat/update subscription record
-        // Cek apakah sudah ada subscription aktif untuk customer ini
-        const [existingSubscriptions] = await connection.query(
-          `SELECT id FROM subscriptions 
-         WHERE customer_id = ? AND status = 'active'
-         ORDER BY expired_at DESC LIMIT 1`,
-          [customerId]
-        );
-
-        //  Check if customer was suspended and reactivate
-        if (customer.customer_status === "suspended") {
-          console.log(
-            `🔄 Customer was suspended, reactivating after payment...`
+      } catch (updateError) {
+        // Jika error karena foreign key constraint, coba tanpa paid_by
+        if (
+          updateError.code === "ER_NO_REFERENCED_ROW_2" ||
+          updateError.errno === 1452
+        ) {
+          console.warn(
+            `⚠️ Foreign key constraint error, updating invoice without paid_by`,
           );
-
-          try {
-            const SuspensionService = require("./suspension.service");
-            await SuspensionService.reactivateCustomer(
-              customerId,
-              adminId,
-              "Reactivated: Invoice paid"
-            );
-            console.log(`✅ Customer ${customerId} reactivated after payment`);
-          } catch (reactivateError) {
-            console.warn(
-              `⚠️ Failed to reactivate customer ${customerId} after payment:`,
-              reactivateError.message
-            );
-          }
-        }
-
-        if (existingSubscriptions.length > 0) {
-          // Update existing subscription - PERBAIKAN DI SINI
           await connection.query(
-            `UPDATE subscriptions 
-           SET expired_at = ?, status = 'active'
+            `UPDATE invoices SET
+            status = 'paid',
+            paid_date = NOW(),
+            payment_method = ?,
+            reference_number = ?,
+            payment_notes = ?,
+            updated_at = NOW()
            WHERE id = ?`,
-            [newExpiredDateStr, existingSubscriptions[0].id]
-          );
-          console.log(`✅ Updated existing subscription`);
-        } else {
-          // Buat subscription baru
-          await connection.query(
-            `INSERT INTO subscriptions (customer_id, package_id, start_date, expired_at, status, invoice_id, created_at)
-           VALUES (?, ?, ?, ?, 'active', ?, NOW())`,
             [
-              customerId,
-              packageId,
-              today.toISOString().split("T")[0],
-              newExpiredDateStr,
+              paymentData.payment_method,
+              paymentRef,
+              paymentData.notes || "Payment via dashboard",
               invoiceId,
-            ]
+            ],
           );
-          console.log(`✅ Created new subscription record`);
+        } else {
+          throw updateError;
+        }
+      }
+
+      console.log(`✅ Invoice marked as paid`);
+
+      // 4. Update customer subscription jika ada package
+      if (invoice.package_id && invoice.duration_days) {
+        const today = new Date();
+        let newExpiryDate = invoice.customer_expired
+          ? new Date(invoice.customer_expired)
+          : new Date(today);
+
+        // Jika sudah expired, mulai dari hari ini
+        if (newExpiryDate <= today) {
+          newExpiryDate = new Date(today);
         }
 
-        console.log(
-          `✅ Customer ${customerId} extended to: ${newExpiredDateStr}`
+        newExpiryDate.setDate(
+          newExpiryDate.getDate() + parseInt(invoice.duration_days),
         );
-      } else {
+        const newExpiryStr = newExpiryDate.toISOString().split("T")[0];
+
+        await connection.query(
+          `UPDATE customers SET
+          expired_at = ?,
+          status = 'active',
+          updated_at = NOW()
+         WHERE id = ?`,
+          [newExpiryStr, invoice.customer_id],
+        );
+
         console.log(
-          `⚠️ No package found for invoice ${invoiceId}, skipping extension`
+          `✅ Customer ${invoice.customer_name} extended to ${newExpiryStr}`,
         );
       }
 
-      // 8. Log activity
-      await connection.query(
-        `INSERT INTO logs (action, entity, entity_id, description, source, admin_id, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, NOW())`,
-        [
-          "process_payment",
-          "invoice",
-          invoiceId,
-          `Payment processed for invoice ${invoice.invoice_number}. Amount: ${paymentAmount}, Method: ${paymentData.payment_method}`,
-          "admin",
-          adminId,
-        ]
-      );
+      // 5. Log activity (jika tabel logs ada)
+      try {
+        const [logTables] = await connection.query("SHOW TABLES LIKE 'logs'");
+        if (logTables.length > 0) {
+          await connection.query(
+            `INSERT INTO logs (action, entity, entity_id, description, source, admin_id, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, NOW())`,
+            [
+              "invoice_paid",
+              "invoice",
+              invoiceId,
+              `Invoice ${invoice.invoice_number} paid via ${paymentData.payment_method}. Amount: ${paymentAmount}`,
+              "admin",
+              adminId,
+            ],
+          );
+        }
+      } catch (logError) {
+        console.warn(`⚠️ Failed to log activity:`, logError.message);
+      }
 
       await connection.commit();
 
-      // 9. Return updated data
-      const [updatedInvoice] = await connection.query(
+      // 6. Return success response
+      const [updatedInvoices] = await connection.query(
         `SELECT i.*, c.name as customer_name, c.expired_at as customer_expired
-       FROM invoices i
-       JOIN customers c ON i.customer_id = c.id
+       FROM invoices i JOIN customers c ON i.customer_id = c.id
        WHERE i.id = ?`,
-        [invoiceId]
+        [invoiceId],
       );
 
+      const updatedInvoice = updatedInvoices[0];
+
+      // PERBAIKAN: Hanya return data, tanpa wrapper success/message
       return {
-        success: true,
-        message: "Payment processed successfully",
-        data: {
-          invoice: updatedInvoice[0],
-          payment_id: paymentResult.insertId,
-          amount_paid: paymentAmount,
-          customer_extended: packageId ? true : false,
+        invoice: updatedInvoice,
+        payment: {
+          id: paymentResult.insertId,
+          amount: paymentAmount,
+          payment_method: paymentData.payment_method,
+          reference: paymentRef,
         },
       };
     } catch (error) {
-      await connection.rollback();
-      console.error(
-        "❌ Error in InvoiceService.processPayment:",
-        error.message
-      );
+      console.error("❌ Error in processPayment:", error.message);
+      if (connection) await connection.rollback();
       throw error;
     } finally {
-      if (connection && connection.release) {
-        connection.release();
-      }
+      if (connection) connection.release();
     }
   }
+
+  // static async processPayment(req, res) {
+  //   try {
+  //     const { id } = req.params;
+  //     const { amount, payment_method, reference, notes } = req.body;
+  //     const adminId = req.user.id;
+
+  //     console.log(`💳 Processing payment request:`, {
+  //       invoiceId: id,
+  //       amount,
+  //       payment_method,
+  //       reference,
+  //       notes,
+  //       adminId,
+  //     });
+
+  //     // Validasi
+  //     if (!amount || amount <= 0) {
+  //       return res.status(400).json({
+  //         success: false,
+  //         message: "Valid amount is required",
+  //       });
+  //     }
+
+  //     if (!payment_method) {
+  //       return res.status(400).json({
+  //         success: false,
+  //         message: "Payment method is required",
+  //       });
+  //     }
+
+  //     // Convert amount to number jika perlu
+  //     const paymentAmount = parseFloat(amount);
+
+  //     if (isNaN(paymentAmount)) {
+  //       return res.status(400).json({
+  //         success: false,
+  //         message: "Invalid amount format",
+  //       });
+  //     }
+
+  //     console.log(`🔧 Calling InvoiceService.processPayment`);
+
+  //     // Panggil service
+  //     const result = await InvoiceService.processPayment(
+  //       id,
+  //       {
+  //         amount: paymentAmount,
+  //         payment_method,
+  //         reference,
+  //         notes,
+  //       },
+  //       adminId,
+  //     );
+
+  //     console.log(`✅ Payment processed successfully:`, result);
+
+  //     // Kembalikan response yang konsisten
+  //     res.json({
+  //       success: true,
+  //       message: "Payment processed successfully",
+  //       data: result,
+  //     });
+  //   } catch (error) {
+  //     console.error("❌ Error in processPayment controller:", {
+  //       message: error.message,
+  //       stack: error.stack,
+  //       code: error.code,
+  //       sqlMessage: error.sqlMessage,
+  //     });
+
+  //     let statusCode = 500;
+  //     let errorMessage = error.message;
+
+  //     if (error.message === "Invoice not found") {
+  //       statusCode = 404;
+  //     } else if (error.message.includes("already paid")) {
+  //       statusCode = 400;
+  //     } else if (error.message.includes("cancelled")) {
+  //       statusCode = 400;
+  //     } else if (error.message.includes("exceeds invoice amount")) {
+  //       statusCode = 400;
+  //     }
+
+  //     res.status(statusCode).json({
+  //       success: false,
+  //       message: errorMessage,
+  //       error:
+  //         process.env.NODE_ENV === "development"
+  //           ? {
+  //               message: error.message,
+  //               stack: error.stack,
+  //               code: error.code,
+  //             }
+  //           : undefined,
+  //     });
+  //   }
+  // }
 
   // Update invoice status
   static async updateInvoiceStatus(invoiceId, status, adminId) {
@@ -555,7 +603,7 @@ class InvoiceService {
 
       const [invoices] = await connection.query(
         "SELECT * FROM invoices WHERE id = ?",
-        [invoiceId]
+        [invoiceId],
       );
 
       if (invoices.length === 0) {
@@ -566,7 +614,7 @@ class InvoiceService {
 
       await connection.query(
         "UPDATE invoices SET status = ?, updated_at = NOW() WHERE id = ?",
-        [status, invoiceId]
+        [status, invoiceId],
       );
 
       // Log activity
@@ -581,7 +629,7 @@ class InvoiceService {
           `Invoice status updated to ${status}`,
           "admin",
           adminId,
-        ]
+        ],
       );
 
       await connection.commit();
@@ -608,7 +656,7 @@ class InvoiceService {
       // 1. Cek apakah invoice ada
       const [invoices] = await connection.query(
         "SELECT * FROM invoices WHERE id = ?",
-        [invoiceId]
+        [invoiceId],
       );
 
       if (invoices.length === 0) {
@@ -620,7 +668,7 @@ class InvoiceService {
       // 2. Cek jika invoice sudah ada pembayaran
       const [payments] = await connection.query(
         "SELECT COUNT(*) as count FROM payments WHERE invoice_id = ?",
-        [invoiceId]
+        [invoiceId],
       );
 
       const paymentCount = payments[0].count;
@@ -632,21 +680,21 @@ class InvoiceService {
          FROM payments p 
          WHERE p.invoice_id = ? 
          LIMIT 3`,
-          [invoiceId]
+          [invoiceId],
         );
 
         throw new Error(
           `Cannot delete invoice. It has ${paymentCount} payment record(s). ` +
             `Amount: ${paymentDetails
               .map((p) => `Rp ${parseFloat(p.amount).toLocaleString("id-ID")}`)
-              .join(", ")}`
+              .join(", ")}`,
         );
       }
 
       // 3. Cek apakah invoice digunakan di subscriptions
       const [subscriptions] = await connection.query(
         "SELECT COUNT(*) as count FROM subscriptions WHERE invoice_id = ?",
-        [invoiceId]
+        [invoiceId],
       );
 
       const subscriptionCount = subscriptions[0].count;
@@ -655,17 +703,17 @@ class InvoiceService {
         // Update subscription untuk set invoice_id menjadi NULL
         await connection.query(
           "UPDATE subscriptions SET invoice_id = NULL WHERE invoice_id = ?",
-          [invoiceId]
+          [invoiceId],
         );
         console.log(
-          `⚠️ Updated ${subscriptionCount} subscription(s) to remove invoice reference`
+          `⚠️ Updated ${subscriptionCount} subscription(s) to remove invoice reference`,
         );
       }
 
       // 4. Delete invoice
       const [result] = await connection.query(
         "DELETE FROM invoices WHERE id = ?",
-        [invoiceId]
+        [invoiceId],
       );
 
       if (result.affectedRows === 0) {
@@ -683,7 +731,7 @@ class InvoiceService {
           `Invoice deleted: ${invoice.invoice_number}`,
           "admin",
           adminId,
-        ]
+        ],
       );
 
       await connection.commit();
@@ -733,7 +781,7 @@ class InvoiceService {
       // 1. Cek apakah invoice ada
       const [invoices] = await connection.query(
         "SELECT * FROM invoices WHERE id = ?",
-        [invoiceId]
+        [invoiceId],
       );
 
       if (invoices.length === 0) {
@@ -745,14 +793,14 @@ class InvoiceService {
       // 2. Cek jika invoice sudah dibayar
       if (invoice.status === "paid") {
         throw new Error(
-          "Cannot cancel a paid invoice. Please refund the payment first."
+          "Cannot cancel a paid invoice. Please refund the payment first.",
         );
       }
 
       // 3. Update status menjadi cancelled
       await connection.query(
         "UPDATE invoices SET status = 'cancelled', updated_at = NOW() WHERE id = ?",
-        [invoiceId]
+        [invoiceId],
       );
 
       // 4. Log activity
@@ -766,7 +814,7 @@ class InvoiceService {
           `Invoice cancelled: ${invoice.invoice_number}`,
           "admin",
           adminId,
-        ]
+        ],
       );
 
       await connection.commit();
@@ -821,7 +869,7 @@ class InvoiceService {
          FROM invoices i
          WHERE i.customer_id = ?
          ORDER BY i.issue_date DESC`,
-        [customerId]
+        [customerId],
       );
 
       return invoices;
@@ -846,7 +894,7 @@ class InvoiceService {
        FROM customers c
        JOIN packages p ON c.package_id = p.id
        WHERE c.id = ?`,
-        [customerId]
+        [customerId],
       );
 
       if (customers.length === 0) {
@@ -857,7 +905,7 @@ class InvoiceService {
 
       // 2. Generate invoice number
       const invoiceNumber = `INV-${Date.now()}-${Math.floor(
-        Math.random() * 1000
+        Math.random() * 1000,
       )}`;
 
       // 3. Hitung tanggal due date (misal 7 hari dari sekarang)
@@ -875,7 +923,7 @@ class InvoiceService {
           customer.price,
           issueDate.toISOString().split("T")[0],
           dueDate.toISOString().split("T")[0],
-        ]
+        ],
       );
 
       const invoiceId = invoiceResult.insertId;
@@ -891,7 +939,7 @@ class InvoiceService {
           `Auto invoice created for ${customer.name} - ${customer.package_name}`,
           "system",
           adminId,
-        ]
+        ],
       );
 
       await connection.commit();
@@ -922,7 +970,7 @@ class InvoiceService {
         `UPDATE invoices 
          SET status = 'overdue'
          WHERE status = 'pending'
-         AND due_date < CURDATE()`
+         AND due_date < CURDATE()`,
       );
 
       console.log(`✅ Marked ${result.affectedRows} invoices as overdue`);
@@ -978,7 +1026,7 @@ class InvoiceService {
             customer.price,
             `Pembayaran paket ${customer.package_name}`,
             dueDate,
-          ]
+          ],
         );
 
         generated++;

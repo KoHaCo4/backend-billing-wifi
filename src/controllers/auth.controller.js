@@ -15,20 +15,34 @@ class AuthController {
 
       const result = await AuthService.login(email, password);
 
+      // Format response yang konsisten
       res.json({
         success: true,
         message: "Login successful",
-        data: result,
+        data: {
+          user: result.user,
+          tokens: {
+            accessToken: result.tokens.accessToken,
+            refreshToken: result.tokens.refreshToken,
+            // Juga kirim dalam snake_case
+            access_token:
+              result.tokens.accessToken || result.tokens.access_token,
+            refresh_token:
+              result.tokens.refreshToken || result.tokens.refresh_token,
+          },
+        },
       });
     } catch (error) {
+      console.error("❌ Login error:", error);
       res.status(401).json({
         success: false,
-        message: error.message,
+        message: error.message || "Invalid credentials",
+        code: "AUTH_FAILED",
       });
     }
   }
 
-  // Refresh token
+  // Refresh token method
   static async refreshToken(req, res) {
     try {
       const { refreshToken } = req.body;
@@ -37,6 +51,7 @@ class AuthController {
         return res.status(400).json({
           success: false,
           message: "Refresh token is required",
+          code: "REFRESH_TOKEN_REQUIRED",
         });
       }
 
@@ -45,12 +60,24 @@ class AuthController {
       res.json({
         success: true,
         message: "Token refreshed",
-        data: result,
+        data: {
+          user: result.user,
+          tokens: {
+            accessToken: result.tokens.accessToken,
+            refreshToken: result.tokens.refreshToken,
+            access_token:
+              result.tokens.accessToken || result.tokens.access_token,
+            refresh_token:
+              result.tokens.refreshToken || result.tokens.refresh_token,
+          },
+        },
       });
     } catch (error) {
+      console.error("❌ Refresh token error:", error);
       res.status(401).json({
         success: false,
-        message: error.message,
+        message: error.message || "Invalid refresh token",
+        code: "REFRESH_TOKEN_INVALID",
       });
     }
   }

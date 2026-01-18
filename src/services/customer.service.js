@@ -27,24 +27,24 @@ class CustomerService {
       // 2. Cek apakah username sudah terpakai
       const [existingUsers] = await connection.query(
         "SELECT id, name FROM customers WHERE username_pppoe = ?",
-        [data.username_pppoe]
+        [data.username_pppoe],
       );
 
       if (existingUsers.length > 0) {
         throw new Error(
-          `Username "${data.username_pppoe}" sudah terpakai oleh customer: ${existingUsers[0].name}`
+          `Username "${data.username_pppoe}" sudah terpakai oleh customer: ${existingUsers[0].name}`,
         );
       }
 
       // 3. Get router and package info
       const [routers] = await connection.query(
         'SELECT * FROM routers WHERE id = ? AND status = "active"',
-        [data.router_id]
+        [data.router_id],
       );
 
       const [packages] = await connection.query(
         "SELECT * FROM packages WHERE id = ? AND is_active = TRUE",
-        [data.package_id]
+        [data.package_id],
       );
 
       if (routers.length === 0) throw new Error("Router tidak ditemukan");
@@ -69,7 +69,7 @@ class CustomerService {
       const expiredAtStr = expiredAt.toISOString().split("T")[0];
 
       console.log(
-        `🔧 Creating customer: ${data.username_pppoe}, expires: ${expiredAtStr}`
+        `🔧 Creating customer: ${data.username_pppoe}, expires: ${expiredAtStr}`,
       );
 
       // ✅ PERBAIKAN: TEST MIKROTIK CONNECTION DENGAN SIMPLE METHOD
@@ -87,7 +87,7 @@ class CustomerService {
 
         if (!testResult.success) {
           throw new Error(
-            `Router ${router.name} (${router.ip_address}): ${testResult.message}`
+            `Router ${router.name} (${router.ip_address}): ${testResult.message}`,
           );
         }
 
@@ -95,7 +95,7 @@ class CustomerService {
       } catch (mikrotikError) {
         console.error(
           "❌ MikroTik connection test failed:",
-          mikrotikError.message
+          mikrotikError.message,
         );
 
         // Log error
@@ -109,14 +109,14 @@ class CustomerService {
             `MikroTik connection failed: ${mikrotikError.message}`,
             "system",
             adminId,
-          ]
+          ],
         );
 
         await connection.rollback();
         throw new Error(
           `Gagal terhubung ke router ${router.name} (${router.ip_address}). ` +
             `Error: ${mikrotikError.message}. ` +
-            "Pastikan router aktif dan API port terbuka."
+            "Pastikan router aktif dan API port terbuka.",
         );
       }
 
@@ -136,7 +136,7 @@ class CustomerService {
           expiredAtStr,
           data.status || "active",
           data.auto_renew !== undefined ? data.auto_renew : 1,
-        ]
+        ],
       );
 
       const customerId = customerResult.insertId;
@@ -146,7 +146,7 @@ class CustomerService {
         `INSERT INTO subscriptions 
        (customer_id, package_id, start_date, expired_at, status) 
        VALUES (?, ?, CURDATE(), ?, 'active')`,
-        [customerId, data.package_id, expiredAtStr]
+        [customerId, data.package_id, expiredAtStr],
       );
 
       // 8. ✅ CREATE PPPOE USER DI MIKROTIK (setelah database commit)
@@ -162,11 +162,11 @@ class CustomerService {
           data.username_pppoe,
           data.password_pppoe,
           profileName,
-          `EXP:${expiredAtStr}`
+          `EXP:${expiredAtStr}`,
         );
 
         console.log(
-          `✅ MikroTik user created successfully for customer ${customerId}`
+          `✅ MikroTik user created successfully for customer ${customerId}`,
         );
 
         // Log success
@@ -180,11 +180,11 @@ class CustomerService {
             `PPPoE user ${data.username_pppoe} created on router ${router.name}`,
             "system",
             adminId,
-          ]
+          ],
         );
       } catch (mikrotikCreateError) {
         console.error(
-          `❌ Failed to create PPPoE user: ${mikrotikCreateError.message}`
+          `❌ Failed to create PPPoE user: ${mikrotikCreateError.message}`,
         );
 
         // Log error but DON'T rollback - customer sudah dibuat di database
@@ -198,17 +198,17 @@ class CustomerService {
             `Failed to create PPPoE user: ${mikrotikCreateError.message}`,
             "system",
             adminId,
-          ]
+          ],
         );
 
         // Set flag bahwa user perlu dibuat manual di MikroTik
         await connection.query(
           `UPDATE customers SET mikrotik_status = 'pending' WHERE id = ?`,
-          [customerId]
+          [customerId],
         );
 
         console.warn(
-          `⚠️ Customer created but MikroTik user pending: ${customerId}`
+          `⚠️ Customer created but MikroTik user pending: ${customerId}`,
         );
       }
 
@@ -229,7 +229,7 @@ class CustomerService {
             `Invoice untuk paket ${pkg.name}`,
             "pending",
             expiredAtStr,
-          ]
+          ],
         );
 
         console.log(`✅ Invoice created for customer ${customerId}`);
@@ -249,7 +249,7 @@ class CustomerService {
           `Customer created: ${data.name} (${data.username_pppoe})`,
           "admin",
           adminId,
-        ]
+        ],
       );
 
       await connection.commit();
@@ -273,7 +273,7 @@ class CustomerService {
           await connection.rollback();
           console.log(
             "↩️ Transaction rolled back due to error:",
-            error.message
+            error.message,
           );
         } catch (rollbackError) {
           console.error("❌ Failed to rollback transaction:", rollbackError);
@@ -330,13 +330,13 @@ class CustomerService {
        ${whereClause}
        ORDER BY c.created_at DESC
        LIMIT ? OFFSET ?`,
-        [...params, parseInt(limit), parseInt(offset)]
+        [...params, parseInt(limit), parseInt(offset)],
       );
 
       // Get total count
       const [[{ total }]] = await db.query(
         `SELECT COUNT(*) as total FROM customers c ${whereClause}`,
-        params
+        params,
       );
 
       return {
@@ -368,7 +368,7 @@ class CustomerService {
         `SELECT c.*, r.* FROM customers c 
        JOIN routers r ON c.router_id = r.id 
        WHERE c.id = ?`,
-        [id]
+        [id],
       );
 
       if (customers.length === 0) {
@@ -384,12 +384,12 @@ class CustomerService {
       ) {
         const [existing] = await connection.query(
           "SELECT id FROM customers WHERE username_pppoe = ? AND id != ?",
-          [data.username_pppoe, id]
+          [data.username_pppoe, id],
         );
 
         if (existing.length > 0) {
           throw new Error(
-            `Username "${data.username_pppoe}" sudah digunakan oleh customer lain`
+            `Username "${data.username_pppoe}" sudah digunakan oleh customer lain`,
           );
         }
       }
@@ -415,7 +415,7 @@ class CustomerService {
           updateValues.push(
             field.name === "phone" && data[field.name] === null
               ? null
-              : field.value
+              : field.value,
           );
         }
       });
@@ -443,15 +443,15 @@ class CustomerService {
           const mikrotik = new MikrotikService(customer);
           await mikrotik.updatePPPoEUsername(
             customer.username_pppoe,
-            data.username_pppoe
+            data.username_pppoe,
           );
           console.log(
-            `✅ MikroTik username updated: ${customer.username_pppoe} -> ${data.username_pppoe}`
+            `✅ MikroTik username updated: ${customer.username_pppoe} -> ${data.username_pppoe}`,
           );
         } catch (mikrotikError) {
           console.error(
             `❌ MikroTik username update failed:`,
-            mikrotikError.message
+            mikrotikError.message,
           );
           await connection.query(
             `INSERT INTO logs (action, entity, entity_id, description, source, admin_id) 
@@ -463,7 +463,7 @@ class CustomerService {
               `MikroTik username update failed: ${mikrotikError.message}`,
               "system",
               adminId,
-            ]
+            ],
           );
         }
       }
@@ -480,15 +480,15 @@ class CustomerService {
             data.username_pppoe || customer.username_pppoe;
           await mikrotik.updatePPPoEPassword(
             usernameToUpdate,
-            data.password_pppoe
+            data.password_pppoe,
           );
           console.log(
-            `✅ MikroTik password updated for user: ${usernameToUpdate}`
+            `✅ MikroTik password updated for user: ${usernameToUpdate}`,
           );
         } catch (mikrotikError) {
           console.error(
             `❌ MikroTik password update failed:`,
-            mikrotikError.message
+            mikrotikError.message,
           );
           await connection.query(
             `INSERT INTO logs (action, entity, entity_id, description, source, admin_id) 
@@ -500,7 +500,7 @@ class CustomerService {
               `MikroTik password update failed: ${mikrotikError.message}`,
               "system",
               adminId,
-            ]
+            ],
           );
         }
       }
@@ -513,7 +513,7 @@ class CustomerService {
         updateValues.push(id);
 
         const updateQuery = `UPDATE customers SET ${updateFields.join(
-          ", "
+          ", ",
         )} WHERE id = ?`;
         await connection.query(updateQuery, updateValues);
       }
@@ -531,7 +531,7 @@ class CustomerService {
           })`,
           "admin",
           adminId,
-        ]
+        ],
       );
 
       await connection.commit();
@@ -546,7 +546,7 @@ class CustomerService {
        JOIN routers r ON c.router_id = r.id
        JOIN packages p ON c.package_id = p.id
        WHERE c.id = ?`,
-        [id]
+        [id],
       );
 
       return updatedCustomers[0];
@@ -590,7 +590,7 @@ class CustomerService {
 
     if (isProduction && userRole !== "superadmin") {
       throw new Error(
-        "Customer deletion is not allowed in production environment"
+        "Customer deletion is not allowed in production environment",
       );
     }
 
@@ -600,7 +600,7 @@ class CustomerService {
       await connection.beginTransaction();
 
       console.log(
-        `🔍 Attempting to delete customer ID: ${id} - ENV: ${process.env.NODE_ENV}`
+        `🔍 Attempting to delete customer ID: ${id} - ENV: ${process.env.NODE_ENV}`,
       );
 
       // 1. Get customer data
@@ -608,7 +608,7 @@ class CustomerService {
         `SELECT c.*, r.* FROM customers c 
        LEFT JOIN routers r ON c.router_id = r.id 
        WHERE c.id = ?`,
-        [id]
+        [id],
       );
 
       if (customers.length === 0) {
@@ -625,14 +625,14 @@ class CustomerService {
          FROM invoices i 
          LEFT JOIN payments p ON i.id = p.invoice_id 
          WHERE i.customer_id = ?`,
-          [id]
+          [id],
         );
 
         if (payments[0].payment_count > 0) {
           throw new Error(
             `Cannot delete customer with payment history. ` +
               `Customer has ${payments[0].payment_count} payment record(s). ` +
-              `Use deactivate instead.`
+              `Use deactivate instead.`,
           );
         }
 
@@ -640,14 +640,14 @@ class CustomerService {
         const [customerAge] = await connection.query(
           `SELECT TIMESTAMPDIFF(HOUR, created_at, NOW()) as hours_old 
          FROM customers WHERE id = ?`,
-          [id]
+          [id],
         );
 
         if (customerAge[0].hours_old > 24) {
           throw new Error(
             `Cannot delete customer older than 24 hours in production. ` +
               `Customer is ${customerAge[0].hours_old} hours old. ` +
-              `Use deactivate instead.`
+              `Use deactivate instead.`,
           );
         }
       }
@@ -655,7 +655,7 @@ class CustomerService {
       // 3. Check for existing invoices
       const [invoices] = await connection.query(
         "SELECT id FROM invoices WHERE customer_id = ?",
-        [id]
+        [id],
       );
 
       const invoiceIds = invoices.map((inv) => inv.id);
@@ -667,7 +667,7 @@ class CustomerService {
         if (invoiceIds.length > 0) {
           await connection.query(
             "DELETE FROM payments WHERE invoice_id IN (?)",
-            [invoiceIds]
+            [invoiceIds],
           );
           console.log(`✅ Deleted payments for ${invoiceIds.length} invoices`);
         }
@@ -682,7 +682,7 @@ class CustomerService {
       // 4. Delete subscriptions
       await connection.query(
         "DELETE FROM subscriptions WHERE customer_id = ?",
-        [id]
+        [id],
       );
       console.log(`✅ Subscriptions deleted`);
 
@@ -698,7 +698,7 @@ class CustomerService {
 
           // Check if user exists before removing
           const userExists = await mikrotik.checkPPPoEUserExists(
-            customer.username_pppoe
+            customer.username_pppoe,
           );
           if (userExists) {
             await mikrotik.removePPPoEUser(customer.username_pppoe);
@@ -727,7 +727,7 @@ class CustomerService {
           `Customer PERMANENTLY deleted: ${customer.name} (${customer.username_pppoe}) - ENV: ${process.env.NODE_ENV}`,
           "admin",
           adminId,
-        ]
+        ],
       );
 
       await connection.commit();
@@ -761,7 +761,7 @@ class CustomerService {
   static async deactivateCustomer(
     customerId,
     adminId,
-    reason = "Deactivated by admin"
+    reason = "Deactivated by admin",
   ) {
     const connection = await db.getConnection();
 
@@ -773,7 +773,7 @@ class CustomerService {
       // 1. Check if customer exists
       const [customers] = await connection.query(
         "SELECT c.*, r.* FROM customers c JOIN routers r ON c.router_id = r.id WHERE c.id = ?",
-        [customerId]
+        [customerId],
       );
 
       if (customers.length === 0) {
@@ -785,20 +785,20 @@ class CustomerService {
       // 2. Check if customer has pending invoices
       const [pendingInvoices] = await connection.query(
         "SELECT COUNT(*) as count FROM invoices WHERE customer_id = ? AND status = 'pending'",
-        [customerId]
+        [customerId],
       );
 
       if (pendingInvoices[0].count > 0) {
         throw new Error(
           `Cannot deactivate customer. There are ${pendingInvoices[0].count} pending invoice(s). ` +
-            "Please process or cancel the invoices first."
+            "Please process or cancel the invoices first.",
         );
       }
 
       // 3. Update status to 'inactive' (need to update ENUM first)
       await connection.query(
         "UPDATE customers SET status = 'inactive', updated_at = NOW() WHERE id = ?",
-        [customerId]
+        [customerId],
       );
 
       // 4. Disable PPPoE user in MikroTik
@@ -815,7 +815,7 @@ class CustomerService {
       } catch (mikrotikError) {
         console.error(
           `⚠️ Failed to disable PPPoE user:`,
-          mikrotikError.message
+          mikrotikError.message,
         );
 
         // Log error but don't fail the whole operation
@@ -829,14 +829,14 @@ class CustomerService {
             `Failed to disable PPPoE user: ${mikrotikError.message}`,
             "system",
             adminId,
-          ]
+          ],
         );
       }
 
       // 5. Update subscription status if exists
       await connection.query(
         "UPDATE subscriptions SET status = 'terminated' WHERE customer_id = ? AND status = 'active'",
-        [customerId]
+        [customerId],
       );
 
       // 6. Log activity
@@ -850,13 +850,13 @@ class CustomerService {
           `Customer deactivated: ${customer.name} (${customer.username_pppoe}) - Reason: ${reason}`,
           "admin",
           adminId,
-        ]
+        ],
       );
 
       await connection.commit();
 
       console.log(
-        `✅ Customer deactivated: ${customer.name} (ID: ${customerId})`
+        `✅ Customer deactivated: ${customer.name} (ID: ${customerId})`,
       );
 
       return {
@@ -873,7 +873,7 @@ class CustomerService {
       await connection.rollback();
       console.error(
         "❌ Error in CustomerService.deactivateCustomer:",
-        error.message
+        error.message,
       );
       throw error;
     } finally {
@@ -895,7 +895,7 @@ class CustomerService {
       // 1. Check if customer exists
       const [customers] = await connection.query(
         "SELECT c.*, r.* FROM customers c JOIN routers r ON c.router_id = r.id WHERE c.id = ?",
-        [customerId]
+        [customerId],
       );
 
       if (customers.length === 0) {
@@ -907,7 +907,7 @@ class CustomerService {
       // 2. Update status to 'active'
       await connection.query(
         "UPDATE customers SET status = 'active', updated_at = NOW() WHERE id = ?",
-        [customerId]
+        [customerId],
       );
 
       // 3. Enable PPPoE user in MikroTik
@@ -935,7 +935,7 @@ class CustomerService {
             `Failed to enable PPPoE user: ${mikrotikError.message}`,
             "system",
             adminId,
-          ]
+          ],
         );
       }
 
@@ -946,11 +946,11 @@ class CustomerService {
       if (expiredDate >= today) {
         await connection.query(
           "UPDATE subscriptions SET status = 'active' WHERE customer_id = ?",
-          [customerId]
+          [customerId],
         );
       } else {
         console.log(
-          `⚠️ Customer ${customer.name} has expired, subscription remains terminated`
+          `⚠️ Customer ${customer.name} has expired, subscription remains terminated`,
         );
       }
 
@@ -965,13 +965,13 @@ class CustomerService {
           `Customer activated: ${customer.name} (${customer.username_pppoe})`,
           "admin",
           adminId,
-        ]
+        ],
       );
 
       await connection.commit();
 
       console.log(
-        `✅ Customer activated: ${customer.name} (ID: ${customerId})`
+        `✅ Customer activated: ${customer.name} (ID: ${customerId})`,
       );
 
       return {
@@ -988,7 +988,7 @@ class CustomerService {
       await connection.rollback();
       console.error(
         "❌ Error in CustomerService.activateCustomer:",
-        error.message
+        error.message,
       );
       throw error;
     } finally {
@@ -1002,7 +1002,7 @@ class CustomerService {
   static async suspendCustomer(
     customerId,
     adminId,
-    reason = "Manual suspension"
+    reason = "Manual suspension",
   ) {
     return await SuspensionService.suspendCustomer(customerId, adminId, reason);
   }

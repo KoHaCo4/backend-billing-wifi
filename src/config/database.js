@@ -19,9 +19,9 @@ const pool = mysql.createPool({
   keepAliveInitialDelay: 0,
 
   // Timeout settings
-  connectTimeout: 10000, // 10 detik timeout untuk connect
-  acquireTimeout: 10000, // 10 detik timeout untuk acquire connection
-  timeout: 60000, // 60 detik timeout untuk query
+  waitForConnections: true,
+  connectionLimit: 10,
+  queueLimit: 0,
 });
 
 // Event listeners untuk monitoring

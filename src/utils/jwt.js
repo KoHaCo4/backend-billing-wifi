@@ -1,53 +1,45 @@
+// utils/jwt.js atau utils/TokenService.js
 const jwt = require("jsonwebtoken");
 
 class TokenService {
-  // Generate both access and refresh tokens
   static generateTokens(payload) {
     const accessToken = jwt.sign(
-      { ...payload, type: "access" },
-      process.env.JWT_SECRET,
-      { expiresIn: process.env.ACCESS_TOKEN_EXPIRE || "15m" }
+      payload,
+      process.env.JWT_ACCESS_SECRET || "access-secret",
+      { expiresIn: process.env.JWT_ACCESS_EXPIRY || "15m" }
     );
 
     const refreshToken = jwt.sign(
-      { id: payload.id, type: "refresh" },
-      process.env.JWT_SECRET, // Gunakan secret yang sama atau beda
-      { expiresIn: process.env.REFRESH_TOKEN_EXPIRE || "7d" }
+      payload,
+      process.env.JWT_REFRESH_SECRET || "refresh-secret",
+      { expiresIn: process.env.JWT_REFRESH_EXPIRY || "7d" }
     );
 
     return { accessToken, refreshToken };
   }
 
-  // Verify token
   static verifyToken(token, type = "access") {
     try {
-      const decoded = jwt.verify(token, process.env.JWT_SECRET);
+      const secret =
+        type === "access"
+          ? process.env.JWT_ACCESS_SECRET || "access-secret"
+          : process.env.JWT_REFRESH_SECRET || "refresh-secret";
 
-      if (decoded.type !== type) {
-        throw new Error(`Invalid token type. Expected: ${type}`);
-      }
-
-      return decoded;
+      return jwt.verify(token, secret);
     } catch (error) {
-      if (error.name === "TokenExpiredError") {
-        throw new Error("Token has expired");
-      }
-      if (error.name === "JsonWebTokenError") {
-        throw new Error("Invalid token");
-      }
-      throw error;
+      throw new Error(`Invalid ${type} token: ${error.message}`);
     }
   }
 
-  // Extract token from request
+  // Tambahkan fungsi extractToken ini
   static extractToken(req) {
     const authHeader = req.headers.authorization;
 
-    if (authHeader && authHeader.startsWith("Bearer ")) {
-      return authHeader.substring(7); // Remove "Bearer "
+    if (!authHeader || !authHeader.startsWith("Bearer ")) {
+      return null;
     }
 
-    return null;
+    return authHeader.split(" ")[1];
   }
 }
 

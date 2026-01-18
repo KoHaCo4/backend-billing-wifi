@@ -13,7 +13,7 @@ try {
   router.get("/stats", suspensionController.getStats);
   router.get("/expiring-soon", suspensionController.getExpiringSoon);
   router.post("/trigger-auto-suspend", suspensionController.triggerAutoSuspend);
-  router.get("/test-connection", suspensionController.testMikrotikConnection);
+  // router.get("/test-connection", suspensionController.testMikrotikConnection);
 
   module.exports = router;
 } catch (error) {

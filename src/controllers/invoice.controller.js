@@ -1,4 +1,6 @@
+const db = require("../config/database"); // Tambahkan ini di atas
 const InvoiceService = require("../services/invoice.service");
+const InvoiceUtils = require("../utils/invoice");
 
 class InvoiceController {
   // Get all invoices
@@ -23,7 +25,7 @@ class InvoiceController {
           search,
         },
         page,
-        limit
+        limit,
       );
 
       res.json({
@@ -67,35 +69,143 @@ class InvoiceController {
   // Create manual invoice
   static async createInvoice(req, res) {
     try {
-      const { customer_id, subscription_id, amount, description } = req.body;
-      const adminId = req.user.id;
+      console.log("📝 Creating invoice with data:", req.body);
 
-      if (!customer_id || !amount) {
+      const {
+        customer_id,
+        subscription_id,
+        package_id,
+        package_name,
+        subtotal,
+        tax_amount = 0,
+        discount_amount = 0,
+        amount,
+        description,
+        invoice_type = "regular",
+        status = "pending",
+        issue_date,
+        due_date,
+        payment_method,
+        reference_number,
+        payment_notes,
+        is_recurring = 0,
+        next_billing_date,
+        items = [],
+      } = req.body;
+
+      // VALIDASI: Pastikan customer_id ada
+      if (!customer_id) {
         return res.status(400).json({
           success: false,
-          message: "customer_id and amount are required",
+          message: "Customer ID is required",
         });
       }
 
-      const invoice = await InvoiceService.createManualInvoice(
-        {
-          customer_id,
-          subscription_id,
-          amount,
-          description,
-        },
-        adminId
+      // Cek apakah customer exists di database - PERBAIKAN DI SINI
+      console.log(`🔍 Checking customer with ID: ${customer_id}`);
+      const [customerRows] = await db.query(
+        "SELECT id, name, phone FROM customers WHERE id = ?", // HAPUS 'code'
+        [customer_id],
       );
 
-      res.status(201).json({
+      if (customerRows.length === 0) {
+        return res.status(400).json({
+          success: false,
+          message: `Customer with ID ${customer_id} not found`,
+        });
+      }
+
+      console.log(
+        `✅ Customer found: ${customerRows[0].name} (Phone: ${customerRows[0].phone})`,
+      );
+
+      // Validate amount
+      if (!amount || parseFloat(amount) <= 0) {
+        return res.status(400).json({
+          success: false,
+          message: "Valid amount is required",
+        });
+      }
+
+      // Generate invoice number
+      const invoice_number = await InvoiceUtils.generateInvoiceNumber();
+      console.log(`📄 Generated invoice number: ${invoice_number}`);
+
+      // Get current date for issue_date if not provided
+      const today = new Date().toISOString().split("T")[0];
+
+      // Calculate due date if not provided (default 7 days)
+      let finalDueDate = due_date;
+      if (!finalDueDate) {
+        const dueDateObj = new Date();
+        dueDateObj.setDate(dueDateObj.getDate() + 7);
+        finalDueDate = dueDateObj.toISOString().split("T")[0];
+      }
+
+      // Get package name if not provided
+      let finalPackageName = package_name;
+      if (!finalPackageName && package_id) {
+        try {
+          const [packageRows] = await db.query(
+            "SELECT name FROM packages WHERE id = ?",
+            [package_id],
+          );
+          if (packageRows.length > 0) {
+            finalPackageName = packageRows[0].name;
+          }
+        } catch (packageError) {
+          console.warn(
+            "⚠️ Could not fetch package name:",
+            packageError.message,
+          );
+        }
+      }
+
+      // Create invoice data
+      const invoiceData = {
+        invoice_number,
+        customer_id: parseInt(customer_id),
+        subscription_id: subscription_id ? parseInt(subscription_id) : null,
+        package_id: package_id ? parseInt(package_id) : null,
+        package_name: finalPackageName || null,
+        subtotal: parseFloat(subtotal || amount),
+        tax_amount: parseFloat(tax_amount),
+        discount_amount: parseFloat(discount_amount),
+        amount: parseFloat(amount),
+        description: description || "Invoice",
+        invoice_type,
+        status,
+        issue_date: issue_date || today,
+        due_date: finalDueDate,
+        payment_method: payment_method || null,
+        reference_number: reference_number || null,
+        payment_notes: payment_notes || null,
+        created_by: parseInt(customer_id), // Set created_by ke customer_id
+        is_recurring: is_recurring ? 1 : 0,
+        next_billing_date: next_billing_date || null,
+      };
+
+      console.log("📦 Invoice data prepared:", invoiceData);
+
+      // Call service to create invoice
+      const result = await InvoiceService.createManualInvoice(
+        invoiceData,
+        items,
+      );
+
+      res.json({
         success: true,
         message: "Invoice created successfully",
-        data: invoice,
+        data: result,
       });
     } catch (error) {
+      console.error("❌ Create invoice error:", error);
+
       res.status(500).json({
         success: false,
-        message: error.message,
+        message: "Failed to create invoice",
+        error:
+          process.env.NODE_ENV === "development" ? error.message : undefined,
       });
     }
   }
@@ -114,6 +224,7 @@ class InvoiceController {
         });
       }
 
+      // Panggil service, service akan mengembalikan data saja (tanpa wrapper)
       const result = await InvoiceService.processPayment(
         id,
         {
@@ -122,13 +233,14 @@ class InvoiceController {
           reference,
           notes,
         },
-        adminId
+        adminId,
       );
 
+      // Kembalikan response yang konsisten
       res.json({
         success: true,
         message: "Payment processed successfully",
-        data: result,
+        data: result, // result sudah berisi invoice dan payment
       });
     } catch (error) {
       if (error.message === "Invoice not found") {
@@ -162,7 +274,7 @@ class InvoiceController {
       const result = await InvoiceService.updateInvoiceStatus(
         id,
         status,
-        adminId
+        adminId,
       );
 
       res.json({

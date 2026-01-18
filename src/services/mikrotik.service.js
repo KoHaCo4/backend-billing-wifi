@@ -17,7 +17,7 @@ class MikrotikService {
       username: config.username || "admin",
       password: config.password || "",
       api_port: config.api_port || 8728,
-      timeout: config.timeout || 10000,
+      timeout: config.timeout || 5000,
     };
 
     this.client = null;
@@ -311,6 +311,198 @@ class MikrotikService {
         message: `Connection failed: ${error.message}`,
         error_type: errorType,
       };
+    }
+  }
+
+  static async testAllRouters(req, res) {
+    try {
+      console.log("🔧 POST /routers/test-all - Testing all routers");
+
+      // Get all routers from database
+      const [routers] = await db.query(`
+      SELECT id, name, ip_address, host, username, password, api_port, status 
+      FROM routers 
+      WHERE deleted_at IS NULL
+      ORDER BY status DESC, name
+    `);
+
+      if (routers.length === 0) {
+        return res.json({
+          success: true,
+          message: "No routers found in database",
+          data: [],
+          stats: {
+            total: 0,
+            connected: 0,
+            disconnected: 0,
+            errors: 0,
+          },
+        });
+      }
+
+      console.log(`Found ${routers.length} routers to test`);
+
+      const testResults = [];
+      let connectedCount = 0;
+      let errorCount = 0;
+
+      // Test each router sequentially (untuk menghindari overload)
+      for (const router of routers) {
+        try {
+          console.log(
+            `Testing router: ${router.name} (${
+              router.ip_address || router.host
+            })`
+          );
+
+          const startTime = Date.now();
+
+          // Gunakan MikrotikService
+          const MikrotikService = require("../services/mikrotik.service");
+
+          // Gunakan ip_address jika ada, jika tidak gunakan host
+          const routerIp = router.ip_address || router.host;
+
+          if (!routerIp) {
+            testResults.push({
+              routerId: router.id,
+              routerName: router.name,
+              ipAddress: "N/A",
+              status: "error",
+              message: "Router IP/host not configured",
+              duration: 0,
+              timestamp: new Date().toISOString(),
+            });
+            errorCount++;
+            continue;
+          }
+
+          const mikrotik = new MikrotikService({
+            ip_address: routerIp,
+            username: router.username,
+            password: router.password,
+            api_port: router.api_port || 8728,
+            timeout: 8000,
+          });
+
+          // Test connection dengan timeout handling
+          const testPromise = mikrotik.testConnection();
+
+          // Add timeout
+          const timeoutPromise = new Promise((_, reject) => {
+            setTimeout(
+              () => reject(new Error("Connection timeout (8s)")),
+              8000
+            );
+          });
+
+          const result = await Promise.race([testPromise, timeoutPromise]);
+          const duration = Date.now() - startTime;
+
+          if (result.success) {
+            connectedCount++;
+
+            testResults.push({
+              routerId: router.id,
+              routerName: router.name,
+              ipAddress: routerIp,
+              status: "connected",
+              message: result.message || "Connection successful",
+              duration: duration,
+              systemInfo: result.data || {},
+              timestamp: new Date().toISOString(),
+            });
+
+            // Update status di database
+            await db.query(
+              "UPDATE routers SET status = 'active', last_check = NOW() WHERE id = ?",
+              [router.id]
+            );
+
+            console.log(`✅ Router ${router.name}: Connected in ${duration}ms`);
+          } else {
+            testResults.push({
+              routerId: router.id,
+              routerName: router.name,
+              ipAddress: routerIp,
+              status: "disconnected",
+              message: result.message || "Connection failed",
+              error: result.error_type,
+              duration: duration,
+              timestamp: new Date().toISOString(),
+            });
+
+            // Update status di database
+            await db.query(
+              "UPDATE routers SET status = 'inactive', last_check = NOW() WHERE id = ?",
+              [router.id]
+            );
+
+            console.log(`❌ Router ${router.name}: Failed - ${result.message}`);
+          }
+        } catch (error) {
+          errorCount++;
+          const duration = Date.now() - startTime;
+
+          console.error(
+            `❌ Error testing router ${router.name}:`,
+            error.message
+          );
+
+          testResults.push({
+            routerId: router.id,
+            routerName: router.name,
+            ipAddress: router.ip_address || router.host || "N/A",
+            status: "error",
+            message: `Error: ${error.message}`,
+            error: error.message,
+            duration: duration,
+            timestamp: new Date().toISOString(),
+          });
+
+          // Update status ke error
+          await db.query(
+            "UPDATE routers SET status = 'error', last_check = NOW() WHERE id = ?",
+            [router.id]
+          );
+        }
+      }
+
+      // Hitung statistik
+      const disconnectedCount = testResults.filter(
+        (r) => r.status === "disconnected"
+      ).length;
+      const totalCount = routers.length;
+
+      res.json({
+        success: true,
+        message: `Test completed for ${totalCount} routers`,
+        data: {
+          results: testResults,
+          summary: {
+            total: totalCount,
+            connected: connectedCount,
+            disconnected: disconnectedCount,
+            errors: errorCount,
+            successRate:
+              totalCount > 0
+                ? Math.round((connectedCount / totalCount) * 100)
+                : 0,
+          },
+        },
+      });
+
+      console.log(
+        `✅ Test complete: ${connectedCount}/${totalCount} connected (${errorCount} errors)`
+      );
+    } catch (error) {
+      console.error("❌ Error testing all routers:", error);
+      res.status(500).json({
+        success: false,
+        message: "Failed to test routers",
+        error: error.message,
+        stack: process.env.NODE_ENV === "development" ? error.stack : undefined,
+      });
     }
   }
 

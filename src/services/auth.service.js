@@ -63,7 +63,14 @@ class AuthService {
           name: admin.name,
           role: admin.role,
         },
-        tokens,
+        tokens: {
+          accessToken: tokens.accessToken, // Pastikan ini adalah accessToken, bukan token
+          refreshToken: tokens.refreshToken,
+          // atau jika TokenService.generateTokens() mengembalikan:
+          // access_token dan refresh_token
+          access_token: tokens.accessToken || tokens.access_token,
+          refresh_token: tokens.refreshToken || tokens.refresh_token,
+        },
       };
     } catch (error) {
       console.error("❌ Login service error:", error.message);

@@ -1,7 +1,10 @@
 // src/jobs/scheduler.js - PERBAIKAN FINAL
 const cron = require("node-cron");
+const { timeToCron } = require("../utils/timeToCron");
 const pool = require("../config/database");
 const SuspensionService = require("../services/suspension.service");
+const loadSettings = require("../config/settingsBilling");
+const normalizeTime = require("../utils/normalizeTime");
 
 class Scheduler {
   constructor() {
@@ -13,17 +16,34 @@ class Scheduler {
     this.jobDetails = [];
   }
 
-  start() {
+  async start() {
     if (this.isRunning) {
       console.log("⚠️ Scheduler already running");
       return;
     }
 
-    console.log("⏰ Starting safe scheduler...");
+    console.log("⏰ Starting scheduler...");
+
+    const settings = await loadSettings();
+    const scheduler = settings.scheduler;
+
+    if (!scheduler?.autoSuspendEnabled) {
+      console.log("🚫 Auto-suspend disabled in settings");
+      return;
+    }
+
+    const suspendTime = normalizeTime(scheduler.suspendCheckHour);
+    const suspendCron = timeToCron(suspendTime);
+
+    console.log(
+      "⏰ Auto-suspend scheduled at",
+      suspendTime,
+      `(${suspendCron})`
+    );
 
     // Job 1: Auto-suspend dengan LOCK mechanism
     const autoSuspendJob = cron.schedule(
-      "0 1 * * *",
+      suspendCron,
       async () => {
         if (this.isProcessing) {
           console.log(

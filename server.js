@@ -44,59 +44,59 @@ app.get("/api/jobs/status", (req, res) => {
 });
 
 // ✅ Endpoint untuk manual trigger jobs (PROTECTED)
-app.post("/api/jobs/run/:jobName", authenticate, (req, res) => {
-  try {
-    const { jobName } = req.params;
-    const validJobs = [
-      "autoSuspend",
-      "checkExpiring",
-      "checkOverdue",
-      "generateInvoices",
-      "cleanupLogs",
-    ];
+// app.post("/api/jobs/run/:jobName", authenticate, (req, res) => {
+//   try {
+//     const { jobName } = req.params;
+//     const validJobs = [
+//       "autoSuspend",
+//       "checkExpiring",
+//       "checkOverdue",
+//       "generateInvoices",
+//       "cleanupLogs",
+//     ];
 
-    if (!validJobs.includes(jobName)) {
-      return res.status(400).json({
-        success: false,
-        message: `Invalid job name. Valid jobs: ${validJobs.join(", ")}`,
-      });
-    }
+//     if (!validJobs.includes(jobName)) {
+//       return res.status(400).json({
+//         success: false,
+//         message: `Invalid job name. Valid jobs: ${validJobs.join(", ")}`,
+//       });
+//     }
 
-    console.log(`🔧 Manual job trigger: ${jobName} by user ${req.user.id}`);
+//     console.log(`🔧 Manual job trigger: ${jobName} by user ${req.user.id}`);
 
-    // Jalankan job secara async
-    if (scheduler.runJobManually) {
-      scheduler
-        .runJobManually(jobName)
-        .then((result) => {
-          res.json({
-            success: true,
-            message: `Job ${jobName} started successfully`,
-            data: result,
-          });
-        })
-        .catch((error) => {
-          console.error(`Job ${jobName} failed:`, error);
-          res.status(500).json({
-            success: false,
-            message: `Failed to run job ${jobName}: ${error.message}`,
-          });
-        });
-    } else {
-      // Fallback jika scheduler tidak punya method runJobManually
-      res.status(501).json({
-        success: false,
-        message: `Scheduler doesn't support manual execution`,
-      });
-    }
-  } catch (error) {
-    console.error("Error in manual job trigger:", error);
-    res.status(500).json({
-      success: false,
-      message: "Internal server error",
-    });
-  }
-});
+//     // Jalankan job secara async
+//     if (scheduler.runJobManually) {
+//       scheduler
+//         .runJobManually(jobName)
+//         .then((result) => {
+//           res.json({
+//             success: true,
+//             message: `Job ${jobName} started successfully`,
+//             data: result,
+//           });
+//         })
+//         .catch((error) => {
+//           console.error(`Job ${jobName} failed:`, error);
+//           res.status(500).json({
+//             success: false,
+//             message: `Failed to run job ${jobName}: ${error.message}`,
+//           });
+//         });
+//     } else {
+//       // Fallback jika scheduler tidak punya method runJobManually
+//       res.status(501).json({
+//         success: false,
+//         message: `Scheduler doesn't support manual execution`,
+//       });
+//     }
+//   } catch (error) {
+//     console.error("Error in manual job trigger:", error);
+//     res.status(500).json({
+//       success: false,
+//       message: "Internal server error",
+//     });
+//   }
+// });
 
 // ===========================================
 // START SERVER
