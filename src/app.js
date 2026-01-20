@@ -24,12 +24,46 @@ const app = express();
 
 // Security middleware
 app.use(helmet());
-app.use(
-  cors({
-    origin: process.env.FRONTEND_URL || "http://localhost:3000",
-    credentials: true,
-  }),
-);
+
+const allowedOrigins = [
+  'https://your-frontend.vercel.app', // Domain Vercel Anda
+  'http://localhost:3000', // Local development
+  'http://localhost:3001',
+  'https://billing.fstnews.my.id', // Domain Anda
+];
+
+const corsOptions = {
+  origin: function (origin, callback) {
+    // Allow requests with no origin (like mobile apps or curl requests)
+    if (!origin) return callback(null, true);
+    
+    if (allowedOrigins.indexOf(origin) !== -1) {
+      callback(null, true);
+    } else {
+      console.log('❌ CORS blocked for origin:', origin);
+      callback(new Error('Not allowed by CORS'));
+    }
+  },credentials: true, // Allow cookies/auth headers
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
+  allowedHeaders: [
+    'Content-Type', 
+    'Authorization', 
+    'X-Requested-With',
+    'Accept',
+    'Origin'
+  ],
+  exposedHeaders: ['Content-Range', 'X-Content-Range'],
+  maxAge: 86400 // 24 hours
+};
+
+app.use(cors(corsOptions));
+// app.use(
+  // cors({
+   // origin: process.env.FRONTEND_URL || "http://localhost:3000",
+    // credentials: true,
+ // }),
+// );
+app.options('*', cors(corsOptions));
 
 // Logging
 app.use(morgan("dev"));
