@@ -1043,20 +1043,6 @@ class MikrotikService {
     }
   }
 
-  
-    // Buat promise untuk connect dengan timeout
-    const connectPromise = client.connect();
-    const timeoutPromise = new Promise((_, reject) =>
-      setTimeout(
-        () => reject(new Error(`Connection timeout after ${timeout}ms`)),
-        timeout,
-      ),
-    );
-
-    await Promise.race([connectPromise, timeoutPromise]);
-    return client;
-  }
-
   // Update PPPoE profile rate limit
   async updatePPPoEProfile(profileName, rateLimit) {
     let client = null;
