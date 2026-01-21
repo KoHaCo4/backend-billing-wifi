@@ -985,7 +985,7 @@ class MikrotikService {
 
     try {
       // Connect dengan timeout 8 detik
-      client = await this.connectWithTimeout(8000);
+      client = await this.connect();
 
       // Cek apakah profil sudah ada - dengan timeout 3 detik
       const checkPromise = client.write("/ppp/profile/print", [
@@ -1043,18 +1043,7 @@ class MikrotikService {
     }
   }
 
-  // Helper untuk connect dengan timeout
-  async connectWithTimeout(timeout = 8000) {
-    const { MikrotikApi } = require("mikrotik-api");
-
-    const client = new MikrotikApi({
-      host: this.config.ip_address,
-      username: this.config.username,
-      password: this.config.password,
-      port: this.config.api_port || 8728,
-      timeout: timeout,
-    });
-
+  
     // Buat promise untuk connect dengan timeout
     const connectPromise = client.connect();
     const timeoutPromise = new Promise((_, reject) =>
