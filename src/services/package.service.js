@@ -23,6 +23,7 @@ class PackageService {
   }
 
   // Create package
+  // package.service.js - Update createPackage
   static async createPackage(data, adminId) {
     const connection = await db.getConnection();
 
@@ -31,7 +32,7 @@ class PackageService {
 
       console.log("📦 Creating package with data:", data);
 
-      // Validasi data yang diperlukan
+      // Validasi
       const requiredFields = ["name", "price", "duration_days"];
       for (const field of requiredFields) {
         if (!data[field]) {
@@ -39,7 +40,7 @@ class PackageService {
         }
       }
 
-      // Buat profil name default jika tidak ada
+      // Generate profile name
       const profileName =
         data.profile_name ||
         data.name
@@ -47,14 +48,45 @@ class PackageService {
           .replace(/\s+/g, "_")
           .replace(/[^a-z0-9_]/g, "");
 
-      // Siapkan query untuk insert package
+      // ============================================
+      // 1. VALIDASI ROUTER YANG DIPILIH
+      // ============================================
+      let selectedRouters = [];
+      if (data.selected_routers && data.selected_routers.length > 0) {
+        // Ambil data router yang dipilih
+        const routerIds = Array.isArray(data.selected_routers)
+          ? data.selected_routers
+          : [data.selected_routers];
+
+        const [routers] = await connection.query(
+          'SELECT * FROM routers WHERE id IN (?) AND status = "active"',
+          [routerIds],
+        );
+
+        if (routers.length !== routerIds.length) {
+          throw new Error("Beberapa router tidak ditemukan atau tidak aktif");
+        }
+
+        selectedRouters = routers;
+        console.log(
+          `🎯 Selected routers for profile creation: ${selectedRouters.length}`,
+        );
+      }
+
+      // ============================================
+      // 2. BUAT PACKAGE DI DATABASE
+      // ============================================
       const query = `
-        INSERT INTO packages (
-          name, duration_days, price, shared_users, 
-          rate_limit, type, is_active, profile_name, 
-          created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())
-      `;
+      INSERT INTO packages (
+        name, duration_days, price, shared_users, 
+        rate_limit, type, is_active, profile_name, 
+        mikrotik_status, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())
+    `;
+
+      // Default mikrotik_status berdasarkan apakah ada router yang dipilih
+      const mikrotikStatus =
+        selectedRouters.length > 0 ? "pending" : "not_required";
 
       const values = [
         data.name,
@@ -65,40 +97,31 @@ class PackageService {
         data.type || "pppoe",
         data.is_active !== undefined ? (data.is_active ? 1 : 0) : 1,
         profileName,
+        mikrotikStatus,
       ];
-
-      console.log("📝 Executing SQL:", query);
-      console.log("📝 Values:", values);
 
       const [result] = await connection.query(query, values);
       const packageId = result.insertId;
 
+      console.log(`✅ Package created in DB: ${packageId}`);
+
       // ============================================
-      // INTEGRASI MIKROTIK: Buat PPPoE Profile
+      // 3. BUAT PROFIL DI MIKROTIK (SYNC - ATOMIC)
       // ============================================
-      console.log("🔄 Starting MikroTik integration...");
+      const mikrotikResults = [];
+      const errors = [];
 
-      // Get all active routers
-      const [routers] = await connection.query(
-        'SELECT * FROM routers WHERE status = "active"'
-      );
+      if (selectedRouters.length > 0) {
+        console.log("🔄 Creating PPPoE profiles on selected routers...");
 
-      if (routers.length === 0) {
-        console.log(
-          "⚠️ No active routers found, skipping MikroTik integration"
-        );
-      } else {
-        const mikrotikResults = [];
-        const errors = [];
-
-        // Buat profil di semua router yang aktif
-        for (const router of routers) {
+        for (const router of selectedRouters) {
+          let mikrotik = null;
           try {
             console.log(
-              `🔧 Creating PPPoE profile on router: ${router.name} (${router.ip_address})`
+              `🔧 Creating profile on router: ${router.name} (${router.ip_address})`,
             );
 
-            const mikrotik = new MikrotikService({
+            mikrotik = new MikrotikService({
               ip_address: router.ip_address,
               username: router.username,
               password: router.password,
@@ -106,26 +129,36 @@ class PackageService {
               api_port: router.api_port || 8728,
             });
 
-            // Buat PPPoE profile
-            const result = await mikrotik.createPPPoEProfile(
-              profileName,
-              data.rate_limit || "unlimited"
+            // Gunakan timeout lebih pendek per router
+            const timeoutPromise = new Promise((_, reject) =>
+              setTimeout(
+                () => reject(new Error("Router timeout (10s)")),
+                10000,
+              ),
             );
+
+            // Create PPPoE profile
+            const profileResult = await Promise.race([
+              mikrotik.createPPPoEProfile(
+                profileName,
+                data.rate_limit || "unlimited",
+              ),
+              timeoutPromise,
+            ]);
 
             mikrotikResults.push({
               router_id: router.id,
               router_name: router.name,
+              ip_address: router.ip_address,
               success: true,
-              message: result.message,
+              message: profileResult.message,
             });
 
-            console.log(
-              `✅ PPPoE profile created on ${router.name}: ${profileName}`
-            );
+            console.log(`✅ Profile created on ${router.name}`);
           } catch (mikrotikError) {
             console.error(
-              `❌ Failed to create profile on router ${router.name}:`,
-              mikrotikError.message
+              `❌ Failed on router ${router.name}:`,
+              mikrotikError.message,
             );
             errors.push({
               router_id: router.id,
@@ -133,47 +166,36 @@ class PackageService {
               error: mikrotikError.message,
             });
 
-            // Log error ke database
-            await connection.query(
-              `INSERT INTO logs (action, entity, entity_id, description, source, admin_id) 
-               VALUES (?, ?, ?, ?, ?, ?)`,
-              [
-                "mikrotik_profile_error",
-                "package",
-                packageId,
-                `Failed to create PPPoE profile on router ${router.name}: ${mikrotikError.message}`,
-                "system",
-                adminId,
-              ]
+            // JANGAN LANJUTKAN - ROLLBACK SEMUA
+            throw new Error(
+              `Gagal membuat profil pada router ${router.name} (${router.ip_address}): ` +
+                `${mikrotikError.message}. Transaksi dibatalkan.`,
             );
+          } finally {
+            if (mikrotik) {
+              try {
+                await mikrotik.disconnect();
+              } catch (e) {
+                console.warn("Failed to disconnect from Mikrotik:", e.message);
+              }
+            }
           }
         }
 
-        // Log hasil integrasi MikroTik
-        if (mikrotikResults.length > 0) {
-          await connection.query(
-            `INSERT INTO logs (action, entity, entity_id, description, source, admin_id) 
-             VALUES (?, ?, ?, ?, ?, ?)`,
-            [
-              "mikrotik_profile_created",
-              "package",
-              packageId,
-              `PPPoE profile "${profileName}" created on ${mikrotikResults.length} router(s)`,
-              "system",
-              adminId,
-            ]
-          );
-        }
-
-        console.log(`📊 MikroTik integration summary:`);
-        console.log(`   ✅ Success: ${mikrotikResults.length} router(s)`);
-        console.log(`   ❌ Failed: ${errors.length} router(s)`);
+        // Update mikrotik_status jika semua berhasil
+        await connection.query(
+          "UPDATE packages SET mikrotik_status = ? WHERE id = ?",
+          ["created", packageId],
+        );
       }
 
-      // Log activity
+      // ============================================
+      // 4. SIMPAN LOG DAN COMMIT
+      // ============================================
+      // Log package creation
       await connection.query(
         `INSERT INTO logs (action, entity, entity_id, description, source, admin_id) 
-         VALUES (?, ?, ?, ?, ?, ?)`,
+       VALUES (?, ?, ?, ?, ?, ?)`,
         [
           "create_package",
           "package",
@@ -181,43 +203,68 @@ class PackageService {
           `Package created: ${data.name} (${profileName})`,
           "admin",
           adminId,
-        ]
+        ],
       );
+
+      // Log Mikrotik results jika ada
+      if (mikrotikResults.length > 0) {
+        await connection.query(
+          `INSERT INTO logs (action, entity, entity_id, description, source, admin_id) 
+         VALUES (?, ?, ?, ?, ?, ?)`,
+          [
+            "mikrotik_profile_created",
+            "package",
+            packageId,
+            `PPPoE profile "${profileName}" created on ${mikrotikResults.length} router(s)`,
+            "system",
+            adminId,
+          ],
+        );
+      }
 
       await connection.commit();
 
-      // Ambil data package yang baru dibuat
+      // ============================================
+      // 5. RETURN RESULT
+      // ============================================
       const [packages] = await connection.query(
         "SELECT * FROM packages WHERE id = ?",
-        [packageId]
+        [packageId],
       );
 
       const newPackage = packages[0];
 
-      console.log(
-        `🎉 Package created successfully: ${newPackage.name} (ID: ${packageId})`
-      );
+      console.log(`🎉 Package creation COMPLETED: ${newPackage.name}`);
 
       return {
-        id: newPackage.id,
-        name: newPackage.name,
-        price: newPackage.price,
-        duration_days: newPackage.duration_days,
-        shared_users: newPackage.shared_users,
-        rate_limit: newPackage.rate_limit,
-        type: newPackage.type,
-        is_active: newPackage.is_active,
-        profile_name: newPackage.profile_name,
-        created_at: newPackage.created_at,
-        mikrotik_integration: {
-          profile_created: true,
-          profile_name: profileName,
+        success: true,
+        data: {
+          id: newPackage.id,
+          name: newPackage.name,
+          price: newPackage.price,
+          duration_days: newPackage.duration_days,
+          profile_name: newPackage.profile_name,
+          mikrotik_status: newPackage.mikrotik_status,
+          mikrotik_results: mikrotikResults,
+          routers_count: mikrotikResults.length,
         },
+        message:
+          selectedRouters.length > 0
+            ? `Package berhasil dibuat dengan ${mikrotikResults.length} profil MikroTik`
+            : "Package berhasil dibuat (tanpa profil MikroTik)",
       };
     } catch (error) {
-      await connection.rollback();
-      console.error("❌ Error in PackageService.createPackage:", error);
-      logger.error("Create package error:", error);
+      console.error("❌ Package creation failed - ROLLING BACK:", error);
+
+      if (connection) {
+        try {
+          await connection.rollback();
+          console.log("↩️ Transaction rolled back");
+        } catch (rollbackError) {
+          console.error("❌ Failed to rollback:", rollbackError);
+        }
+      }
+
       throw error;
     } finally {
       if (connection && connection.release) {
@@ -238,7 +285,7 @@ class PackageService {
       // Get current package data
       const [currentPackages] = await connection.query(
         "SELECT * FROM packages WHERE id = ?",
-        [id]
+        [id],
       );
 
       if (currentPackages.length === 0) {
@@ -300,7 +347,7 @@ class PackageService {
 
       // Eksekusi update
       const query = `UPDATE packages SET ${updateFields.join(
-        ", "
+        ", ",
       )} WHERE id = ?`;
       updateValues.push(id);
 
@@ -314,7 +361,7 @@ class PackageService {
 
         // Get active routers
         const [routers] = await connection.query(
-          'SELECT * FROM routers WHERE status = "active"'
+          'SELECT * FROM routers WHERE status = "active"',
         );
 
         const profileName = data.profile_name || currentPackage.profile_name;
@@ -336,7 +383,7 @@ class PackageService {
           } catch (mikrotikError) {
             console.error(
               `❌ Failed to update profile on ${router.name}:`,
-              mikrotikError.message
+              mikrotikError.message,
             );
             // Log error but don't fail the whole operation
           }
@@ -354,7 +401,7 @@ class PackageService {
           `Package updated: ${data.name || currentPackage.name}`,
           "admin",
           adminId,
-        ]
+        ],
       );
 
       await connection.commit();
@@ -362,7 +409,7 @@ class PackageService {
       // Get updated package
       const [updatedPackages] = await connection.query(
         "SELECT * FROM packages WHERE id = ?",
-        [id]
+        [id],
       );
 
       return updatedPackages[0];
@@ -389,7 +436,7 @@ class PackageService {
       // 1. Cek apakah package ada
       const [packages] = await connection.query(
         "SELECT * FROM packages WHERE id = ?",
-        [id]
+        [id],
       );
 
       if (packages.length === 0) {
@@ -401,7 +448,7 @@ class PackageService {
       // 2. Cek apakah package sedang digunakan oleh customer
       const [customers] = await connection.query(
         "SELECT COUNT(*) as count FROM customers WHERE package_id = ?",
-        [id]
+        [id],
       );
 
       const customerCount = customers[0].count;
@@ -413,44 +460,44 @@ class PackageService {
          FROM customers c 
          WHERE c.package_id = ? 
          LIMIT 5`,
-          [id]
+          [id],
         );
 
         const customerNames = customerDetails.map((c) => c.name).join(", ");
 
         throw new Error(
           `Cannot delete package. It is being used by ${customerCount} customer(s). ` +
-            (customerNames ? `Examples: ${customerNames}` : "")
+            (customerNames ? `Examples: ${customerNames}` : ""),
         );
       }
 
       // 3. Cek apakah package digunakan di subscriptions
       const [subscriptions] = await connection.query(
         "SELECT COUNT(*) as count FROM subscriptions WHERE package_id = ?",
-        [id]
+        [id],
       );
 
       const subscriptionCount = subscriptions[0].count;
 
       if (subscriptionCount > 0) {
         throw new Error(
-          `Cannot delete package. It is referenced in ${subscriptionCount} subscription(s).`
+          `Cannot delete package. It is referenced in ${subscriptionCount} subscription(s).`,
         );
       }
 
       // 4. Jika tidak digunakan, baru hapus package dari database
       const [deleteResult] = await connection.query(
         "DELETE FROM packages WHERE id = ?",
-        [id]
+        [id],
       );
 
       // 5. Hapus profil PPPoE dari semua router yang aktif
       console.log(
-        `🔄 Starting MikroTik profile deletion for: ${packageData.profile_name}`
+        `🔄 Starting MikroTik profile deletion for: ${packageData.profile_name}`,
       );
 
       const [routers] = await connection.query(
-        'SELECT * FROM routers WHERE status = "active"'
+        'SELECT * FROM routers WHERE status = "active"',
       );
 
       const mikrotikResults = [];
@@ -468,7 +515,7 @@ class PackageService {
 
           // Hapus PPPoE profile dari MikroTik
           const result = await mikrotik.deletePPPoEProfile(
-            packageData.profile_name
+            packageData.profile_name,
           );
 
           mikrotikResults.push({
@@ -479,12 +526,12 @@ class PackageService {
           });
 
           console.log(
-            `✅ PPPoE profile deleted from ${router.name}: ${packageData.profile_name}`
+            `✅ PPPoE profile deleted from ${router.name}: ${packageData.profile_name}`,
           );
         } catch (mikrotikError) {
           console.error(
             `❌ Failed to delete profile on router ${router.name}:`,
-            mikrotikError.message
+            mikrotikError.message,
           );
           errors.push({
             router_id: router.id,
@@ -503,7 +550,7 @@ class PackageService {
               `Failed to delete PPPoE profile on router ${router.name}: ${mikrotikError.message}`,
               "system",
               adminId,
-            ]
+            ],
           );
         }
       }
@@ -519,13 +566,13 @@ class PackageService {
           `Package deleted: ${packageData.name} (${packageData.profile_name})`,
           "admin",
           adminId,
-        ]
+        ],
       );
 
       await connection.commit();
 
       console.log(
-        `✅ Package deleted successfully: ${packageData.name} (ID: ${id})`
+        `✅ Package deleted successfully: ${packageData.name} (ID: ${id})`,
       );
 
       return {
@@ -574,7 +621,7 @@ class PackageService {
   static async getActivePackages() {
     try {
       const [packages] = await db.query(
-        "SELECT * FROM packages WHERE is_active = 1 ORDER BY price ASC"
+        "SELECT * FROM packages WHERE is_active = 1 ORDER BY price ASC",
       );
       return packages;
     } catch (error) {
@@ -589,7 +636,7 @@ class PackageService {
       const newStatus = currentStatus ? 0 : 1;
       const [result] = await db.query(
         "UPDATE packages SET is_active = ?, updated_at = NOW() WHERE id = ?",
-        [newStatus, id]
+        [newStatus, id],
       );
       return result.affectedRows > 0;
     } catch (error) {

@@ -46,7 +46,7 @@ class MikrotikService {
 
         this.client.on("timeout", () => {
           const error = new Error(
-            `Connection timeout to ${this.config.ip_address}`
+            `Connection timeout to ${this.config.ip_address}`,
           );
           console.warn(`⚠️ ${error.message}`);
           reject(error);
@@ -75,7 +75,7 @@ class MikrotikService {
    */
   async testConnection() {
     console.log(
-      `🔄 Testing MikroTik connection to ${this.config.ip_address}...`
+      `🔄 Testing MikroTik connection to ${this.config.ip_address}...`,
     );
 
     try {
@@ -130,7 +130,7 @@ class MikrotikService {
       const timeoutPromise = new Promise((_, reject) => {
         setTimeout(
           () => reject(new Error("Connection timeout after 5s")),
-          5000
+          5000,
         );
       });
 
@@ -212,10 +212,10 @@ class MikrotikService {
           free_memory: parseInt(resource[0]["free-memory"]) || 0,
           total_memory: parseInt(resource[0]["total-memory"]) || 0,
           free_memory_mb: Math.round(
-            (parseInt(resource[0]["free-memory"]) || 0) / 1024 / 1024
+            (parseInt(resource[0]["free-memory"]) || 0) / 1024 / 1024,
           ),
           total_memory_mb: Math.round(
-            (parseInt(resource[0]["total-memory"]) || 0) / 1024 / 1024
+            (parseInt(resource[0]["total-memory"]) || 0) / 1024 / 1024,
           ),
           memory_usage: resource[0]["memory-usage"] || "Unknown",
           architecture_name: resource[0]["architecture-name"] || "Unknown",
@@ -352,7 +352,7 @@ class MikrotikService {
           console.log(
             `Testing router: ${router.name} (${
               router.ip_address || router.host
-            })`
+            })`,
           );
 
           const startTime = Date.now();
@@ -392,7 +392,7 @@ class MikrotikService {
           const timeoutPromise = new Promise((_, reject) => {
             setTimeout(
               () => reject(new Error("Connection timeout (8s)")),
-              8000
+              8000,
             );
           });
 
@@ -416,7 +416,7 @@ class MikrotikService {
             // Update status di database
             await db.query(
               "UPDATE routers SET status = 'active', last_check = NOW() WHERE id = ?",
-              [router.id]
+              [router.id],
             );
 
             console.log(`✅ Router ${router.name}: Connected in ${duration}ms`);
@@ -435,7 +435,7 @@ class MikrotikService {
             // Update status di database
             await db.query(
               "UPDATE routers SET status = 'inactive', last_check = NOW() WHERE id = ?",
-              [router.id]
+              [router.id],
             );
 
             console.log(`❌ Router ${router.name}: Failed - ${result.message}`);
@@ -446,7 +446,7 @@ class MikrotikService {
 
           console.error(
             `❌ Error testing router ${router.name}:`,
-            error.message
+            error.message,
           );
 
           testResults.push({
@@ -463,14 +463,14 @@ class MikrotikService {
           // Update status ke error
           await db.query(
             "UPDATE routers SET status = 'error', last_check = NOW() WHERE id = ?",
-            [router.id]
+            [router.id],
           );
         }
       }
 
       // Hitung statistik
       const disconnectedCount = testResults.filter(
-        (r) => r.status === "disconnected"
+        (r) => r.status === "disconnected",
       ).length;
       const totalCount = routers.length;
 
@@ -493,7 +493,7 @@ class MikrotikService {
       });
 
       console.log(
-        `✅ Test complete: ${connectedCount}/${totalCount} connected (${errorCount} errors)`
+        `✅ Test complete: ${connectedCount}/${totalCount} connected (${errorCount} errors)`,
       );
     } catch (error) {
       console.error("❌ Error testing all routers:", error);
@@ -630,7 +630,7 @@ class MikrotikService {
       await client.write("/ppp/secret/remove", [`=.id=${userId}`]);
 
       console.log(
-        `✅ PPPoE username updated: ${oldUsername} -> ${newUsername}`
+        `✅ PPPoE username updated: ${oldUsername} -> ${newUsername}`,
       );
       return { success: true, message: "PPPoE username updated" };
     } catch (error) {
@@ -790,7 +790,7 @@ class MikrotikService {
       return { success: true, message: "PPPoE user removed from MikroTik" };
     } catch (error) {
       console.error(
-        `❌ Failed to remove PPPoE user from MikroTik: ${error.message}`
+        `❌ Failed to remove PPPoE user from MikroTik: ${error.message}`,
       );
       throw error;
     } finally {
@@ -979,41 +979,93 @@ class MikrotikService {
   }
 
   // Create PPPoE profile if not exists
+  // mikrotik.service.js - Optimize with better timeout
   async createPPPoEProfile(profileName, rateLimit = "10M/10M") {
     let client = null;
-    try {
-      client = await this.connect();
 
-      // Check if profile exists
-      const profiles = await client.write("/ppp/profile/print", [
+    try {
+      // Connect dengan timeout 8 detik
+      client = await this.connectWithTimeout(8000);
+
+      // Cek apakah profil sudah ada - dengan timeout 3 detik
+      const checkPromise = client.write("/ppp/profile/print", [
         `?name=${profileName}`,
       ]);
 
+      const timeoutPromise = new Promise((_, reject) =>
+        setTimeout(() => reject(new Error("Timeout checking profile")), 3000),
+      );
+
+      const profiles = await Promise.race([checkPromise, timeoutPromise]);
+
       if (profiles.length > 0) {
         console.log(`PPPoE profile ${profileName} already exists`);
-        return { success: true, message: "Profile already exists" };
+        return {
+          success: true,
+          message: "Profile already exists",
+          exists: true,
+        };
       }
 
-      // Create new profile
-      await client.write("/ppp/profile/add", [
+      // Buat profil baru - dengan timeout 5 detik
+      const createPromise = client.write("/ppp/profile/add", [
         `=name=${profileName}`,
         `=rate-limit=${rateLimit}`,
         "=local-address=10.0.0.1",
-        "=remote-address=pppoe-pool",
+        "=remote-address=pppoe",
         "=only-one=yes",
         "=change-tcp-mss=yes",
       ]);
 
+      const createTimeout = new Promise((_, reject) =>
+        setTimeout(() => reject(new Error("Timeout creating profile")), 5000),
+      );
+
+      await Promise.race([createPromise, createTimeout]);
+
       console.log(`✅ PPPoE profile created: ${profileName}`);
-      return { success: true, message: "PPPoE profile created" };
+      return {
+        success: true,
+        message: "PPPoE profile created",
+        created: true,
+      };
     } catch (error) {
       console.error(`❌ Failed to create PPPoE profile: ${error.message}`);
-      throw error;
+      throw new Error(`Mikrotik error: ${error.message}`);
     } finally {
       if (client) {
-        await this.disconnect();
+        try {
+          await client.close();
+        } catch (closeError) {
+          console.warn("Failed to close connection:", closeError.message);
+        }
       }
     }
+  }
+
+  // Helper untuk connect dengan timeout
+  async connectWithTimeout(timeout = 8000) {
+    const { MikrotikApi } = require("mikrotik-api");
+
+    const client = new MikrotikApi({
+      host: this.config.ip_address,
+      username: this.config.username,
+      password: this.config.password,
+      port: this.config.api_port || 8728,
+      timeout: timeout,
+    });
+
+    // Buat promise untuk connect dengan timeout
+    const connectPromise = client.connect();
+    const timeoutPromise = new Promise((_, reject) =>
+      setTimeout(
+        () => reject(new Error(`Connection timeout after ${timeout}ms`)),
+        timeout,
+      ),
+    );
+
+    await Promise.race([connectPromise, timeoutPromise]);
+    return client;
   }
 
   // Update PPPoE profile rate limit
