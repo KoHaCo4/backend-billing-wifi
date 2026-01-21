@@ -26,10 +26,11 @@ const app = express();
 app.use(helmet());
 
 const allowedOrigins = [
-  "https://frontend-billing-wifi.vercel.app", // Domain Vercel Anda
-  "http://localhost:3000", // Local development
+  "https://frontend-billing-wifi.vercel.app", // DOMAIN VERCEL ANDA
+  "https://*.vercel.app", // Allow semua subdomain Vercel
+  "http://localhost:3000",
   "http://localhost:3001",
-  "https://billing.fstnews.my.id", // Domain Anda
+  "https://billing.fstnews.my.id",
 ];
 
 const corsOptions = {
@@ -37,14 +38,21 @@ const corsOptions = {
     // Allow requests with no origin (like mobile apps or curl requests)
     if (!origin) return callback(null, true);
 
+    // Allow all Vercel subdomains
+    if (origin.endsWith(".vercel.app")) {
+      console.log(`✅ Allowing Vercel domain: ${origin}`);
+      return callback(null, true);
+    }
+
     if (allowedOrigins.indexOf(origin) !== -1) {
+      console.log(`✅ Allowing origin: ${origin}`);
       callback(null, true);
     } else {
       console.log("❌ CORS blocked for origin:", origin);
       callback(new Error("Not allowed by CORS"));
     }
   },
-  credentials: true, // Allow cookies/auth headers
+  credentials: true,
   methods: ["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
   allowedHeaders: [
     "Content-Type",
@@ -54,17 +62,19 @@ const corsOptions = {
     "Origin",
   ],
   exposedHeaders: ["Content-Range", "X-Content-Range"],
-  maxAge: 86400, // 24 hours
+  maxAge: 86400,
 };
 
 app.use(cors(corsOptions));
-// app.use(
-// cors({
-// origin: process.env.FRONTEND_URL || "http://localhost:3000",
-// credentials: true,
-// }),
-// );
 app.options("*", cors(corsOptions));
+
+// Tambahkan logging untuk debugging
+app.use((req, res, next) => {
+  console.log(`${new Date().toISOString()} - ${req.method} ${req.url}`);
+  console.log("Origin:", req.headers.origin);
+  console.log("User-Agent:", req.headers["user-agent"]);
+  next();
+});
 
 // Logging
 app.use(morgan("dev"));
