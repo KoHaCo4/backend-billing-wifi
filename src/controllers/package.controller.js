@@ -44,10 +44,10 @@ class PackageController {
       console.log("📦 Create package request:", req.body);
       console.log("👤 Admin:", req.user);
 
-      const adminId = req.user ? req.user.id : 1; // Fallback jika tidak ada auth
+      const adminId = req.user ? req.user.id : 1;
 
       // Validasi input wajib
-      const { name, price, duration_days } = req.body;
+      const { name, price, duration_days, selected_routers } = req.body;
 
       if (!name || !price || !duration_days) {
         return res.status(400).json({
@@ -71,6 +71,7 @@ class PackageController {
         });
       }
 
+      // 🔥 INI PERBAIKAN UTAMA: Sertakan selected_routers!
       // Siapkan data untuk service
       const packageData = {
         name,
@@ -86,18 +87,21 @@ class PackageController {
             .toLowerCase()
             .replace(/\s+/g, "_")
             .replace(/[^a-z0-9_]/g, ""),
+        selected_routers: selected_routers || [], // ⬅️ INI YANG HILANG!
       };
 
+      console.log("📦 Data being sent to service:", {
+        ...packageData,
+        selected_routers: packageData.selected_routers,
+      });
+
       // Panggil service untuk membuat package
-      const newPackage = await PackageService.createPackage(
-        packageData,
-        adminId
-      );
+      const result = await PackageService.createPackage(packageData, adminId);
 
       res.status(201).json({
         success: true,
         message: "Paket berhasil dibuat",
-        data: newPackage,
+        data: result,
       });
     } catch (error) {
       console.error("❌ Error creating package:", error);
@@ -111,6 +115,12 @@ class PackageController {
       } else if (error.message.includes("Duplicate entry")) {
         errorMessage = "Nama paket sudah digunakan";
         statusCode = 400;
+      } else if (
+        error.message.includes("Mikrotik") ||
+        error.message.includes("router")
+      ) {
+        errorMessage = error.message;
+        statusCode = 400;
       }
 
       res.status(statusCode).json({
@@ -121,7 +131,6 @@ class PackageController {
       });
     }
   }
-
   // Get single package
   static async getById(req, res) {
     try {
@@ -159,7 +168,7 @@ class PackageController {
       const updatedPackage = await PackageService.updatePackage(
         id,
         req.body,
-        adminId
+        adminId,
       );
 
       res.json({

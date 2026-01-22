@@ -26,7 +26,14 @@ class PackageService {
   // package.service.js - Update createPackage
   static async createPackage(data, adminId) {
     const connection = await db.getConnection();
-
+    console.log("🎯 SERVICE RECEIVED DATA:", {
+      selected_routers: data.selected_routers,
+      has_selected_routers: !!data.selected_routers,
+      selected_routers_length: data.selected_routers
+        ? data.selected_routers.length
+        : 0,
+      full_data_keys: Object.keys(data),
+    });
     try {
       await connection.beginTransaction();
 

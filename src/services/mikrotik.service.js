@@ -71,55 +71,6 @@ class MikrotikService {
   }
 
   /**
-   * ✅ TEST CONNECTION METHOD YANG BENAR - Tidak pakai client.write langsung
-   */
-  async testConnection() {
-    console.log(
-      `🔄 Testing MikroTik connection to ${this.config.ip_address}...`,
-    );
-
-    try {
-      const connected = await this.connect();
-
-      if (!connected) {
-        return {
-          success: false,
-          message: "Failed to connect to router",
-          router_ip: this.config.ip_address,
-        };
-      }
-
-      // Test dengan command yang lebih sederhana
-      try {
-        await this.client.write("/system/identity/print");
-
-        this.close();
-
-        return {
-          success: true,
-          message: "Connected successfully",
-          router_ip: this.config.ip_address,
-          identity: "MikroTik Router",
-        };
-      } catch (apiError) {
-        this.close();
-        return {
-          success: false,
-          message: `API error: ${apiError.message}`,
-          router_ip: this.config.ip_address,
-        };
-      }
-    } catch (error) {
-      console.error(`❌ Connection test failed: ${error.message}`);
-      return {
-        success: false,
-        message: `Connection failed: ${error.message}`,
-        router_ip: this.config.ip_address,
-      };
-    }
-  }
-
-  /**
    * ✅ SIMPLE CONNECTION CHECK (untuk UI test)
    */
   async simpleTestConnection() {
