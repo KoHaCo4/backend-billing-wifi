@@ -1,8 +1,9 @@
 const PaymentService = require("../services/payment.service");
+const MidtransService = require("../services/midtrans.service"); // Tambahkan ini
+const { Invoice, Customer, Package } = require("../models"); // Import model
 
 class PaymentController {
   // Get all payments
-  // controllers/payment.controller.js
   static async getPayments(req, res) {
     console.log("🔍 PaymentController.getPayments called");
     console.log("📦 Query params:", req.query);
@@ -52,62 +53,6 @@ class PaymentController {
       console.log(
         `✅ PaymentService returned ${result.data?.length || 0} payments`,
       );
-
-      // Jika tidak ada data, coba query langsung dari database
-      if (!result.data || result.data.length === 0) {
-        console.log("🔄 No data from service, querying directly...");
-
-        const [directData] = await db.query(`
-        SELECT 
-          p.*,
-          i.invoice_number,
-          i.customer_id as invoice_customer_id,
-          i.amount as invoice_amount,
-          c.name as customer_name,
-          c.phone as customer_phone
-        FROM payments p
-        LEFT JOIN invoices i ON p.invoice_id = i.id
-        LEFT JOIN customers c ON p.customer_id = c.id
-        ORDER BY p.created_at DESC
-        LIMIT 20
-      `);
-
-        if (directData.length > 0) {
-          console.log(`📊 Direct query found ${directData.length} payments`);
-
-          const formatted = directData.map((payment) => ({
-            id: payment.id,
-            payment_id: payment.id,
-            invoice_id: payment.invoice_id,
-            invoice_number:
-              payment.invoice_number || `INV-${payment.invoice_id}`,
-            customer_id: payment.customer_id || payment.invoice_customer_id,
-            customer_name:
-              payment.customer_name || `Customer ${payment.customer_id}`,
-            customer_phone: payment.customer_phone || "",
-            amount: parseFloat(payment.amount || payment.invoice_amount || 0),
-            status: payment.status || "completed",
-            payment_method: payment.payment_method || "cash",
-            reference: payment.reference || `REF-${payment.id}`,
-            notes: payment.notes || "Payment processed",
-            created_at: payment.created_at,
-            paid_at: payment.paid_date || payment.created_at,
-            description: "Payment transaction",
-            source: "payments_table",
-          }));
-
-          return res.json({
-            success: true,
-            data: formatted,
-            pagination: {
-              page: 1,
-              limit: 20,
-              total: directData.length,
-              pages: 1,
-            },
-          });
-        }
-      }
 
       res.json({
         success: true,
@@ -178,7 +123,7 @@ class PaymentController {
     }
   }
 
-  // controllers/payment.controller.js - Tambahkan method test
+  // Test endpoint
   static async testPayments(req, res) {
     try {
       console.log("🧪 Testing payments endpoint...");
@@ -218,14 +163,14 @@ class PaymentController {
     }
   }
 
-  // Di payment.controller.js atau invoice.controller.js saat marking as paid
+  // Mark invoice as paid manually
   static async markAsPaid(req, res) {
     try {
       const { invoiceId } = req.params;
       const { payment_method, reference, notes } = req.body;
 
       // Gunakan customer_id sebagai paid_by (atau NULL jika tidak ada user)
-      const paid_by = req.user?.id || null; // Jika ada auth
+      const paid_by = req.user?.id || null;
 
       // Atau gunakan customer_id dari invoice
       const [invoice] = await db.query(
@@ -242,7 +187,7 @@ class PaymentController {
           payment_method = ?,
           reference_number = ?,
           payment_notes = ?,
-          paid_by = ?  -- Gunakan customer_id atau NULL
+          paid_by = ?
       WHERE id = ?
     `;
 
@@ -250,7 +195,7 @@ class PaymentController {
         payment_method,
         reference,
         notes,
-        paid_by_customer, // atau paid_by
+        paid_by_customer,
         invoiceId,
       ]);
 
@@ -258,6 +203,489 @@ class PaymentController {
     } catch (error) {
       console.error("Mark as paid error:", error);
       res.status(500).json({ success: false, message: error.message });
+    }
+  }
+
+  // ============ MIDTRANS SNAP POPUP INTEGRATION ============
+
+  // Create Snap transaction for popup
+  static async createSnapTransaction(req, res) {
+    try {
+      const { invoice_id } = req.body;
+
+      console.log("💳 Creating Snap transaction for invoice:", invoice_id);
+
+      if (!invoice_id) {
+        return res.status(400).json({
+          success: false,
+          message: "Invoice ID is required",
+        });
+      }
+
+      // Find invoice with customer data
+      const invoice = await Invoice.findByPk(invoice_id, {
+        include: [
+          {
+            model: Customer,
+            as: "customer",
+            attributes: ["id", "name", "email", "phone", "address"],
+          },
+          {
+            model: Package,
+            as: "package",
+            attributes: ["name", "price", "period"],
+          },
+        ],
+      });
+
+      if (!invoice) {
+        return res.status(404).json({
+          success: false,
+          message: "Invoice not found",
+        });
+      }
+
+      // Check if invoice is already paid
+      if (invoice.status === "paid") {
+        return res.status(400).json({
+          success: false,
+          message: "Invoice already paid",
+        });
+      }
+
+      // Check if there's a pending payment for this invoice
+      const existingPayment =
+        await PaymentService.getPendingPaymentByInvoiceId(invoice_id);
+
+      if (existingPayment) {
+        // Check if payment is still valid (created within last 24 hours)
+        const hoursDiff =
+          (new Date() - new Date(existingPayment.created_at)) /
+          (1000 * 60 * 60);
+        if (hoursDiff < 24) {
+          return res.json({
+            success: true,
+            message: "Existing payment found",
+            data: {
+              snapToken: existingPayment.payment_token,
+              orderId: existingPayment.order_id,
+              paymentId: existingPayment.id,
+              amount: existingPayment.amount,
+              invoice: {
+                id: invoice.id,
+                invoice_number: invoice.invoice_number,
+                amount: invoice.amount,
+                description: invoice.description,
+              },
+            },
+            config: MidtransService.getSnapConfig(),
+          });
+        }
+      }
+
+      // Prepare invoice data for Midtrans
+      const invoiceData = {
+        id: invoice.id,
+        invoice_number: invoice.invoice_number,
+        amount: parseFloat(invoice.amount),
+        description:
+          invoice.description ||
+          `Paket ${invoice.package?.name || "WiFi"} - ${invoice.package?.period || "Bulanan"}`,
+        package_id: invoice.package_id,
+      };
+
+      // Prepare customer data
+      const customerData = {
+        id: invoice.customer.id,
+        name: invoice.customer.name || `Customer ${invoice.customer.username}`,
+        email:
+          invoice.customer.email || `${invoice.customer.username}@wifi.local`,
+        phone: invoice.customer.phone || "081234567890",
+        address: invoice.customer.address || "",
+      };
+
+      // Create Snap transaction
+      const transaction = await MidtransService.createSnapTransaction(
+        invoiceData,
+        customerData,
+      );
+
+      if (!transaction.success) {
+        console.error(
+          "Midtrans error:",
+          transaction.errorDetails || transaction.error,
+        );
+        return res.status(500).json({
+          success: false,
+          message: "Failed to create payment transaction",
+          error: transaction.error,
+          details: transaction.errorDetails,
+        });
+      }
+
+      // Create or update payment record
+      let payment;
+      if (existingPayment) {
+        payment = await PaymentService.updatePayment(existingPayment.id, {
+          payment_token: transaction.snapToken,
+          order_id: transaction.orderId,
+          payment_url: transaction.redirectUrl,
+          midtrans_response: JSON.stringify(transaction.transaction),
+          status: "pending",
+        });
+      } else {
+        // Create new payment record
+        payment = await PaymentService.createPayment({
+          invoice_id: invoice.id,
+          customer_id: invoice.customer.id,
+          amount: invoice.amount,
+          payment_method: "midtrans",
+          status: "pending",
+          order_id: transaction.orderId,
+          payment_token: transaction.snapToken,
+          payment_url: transaction.redirectUrl,
+          midtrans_response: JSON.stringify(transaction.transaction),
+        });
+      }
+
+      res.json({
+        success: true,
+        message: "Snap transaction created successfully",
+        data: {
+          snapToken: transaction.snapToken,
+          orderId: transaction.orderId,
+          paymentId: payment.id,
+          amount: payment.amount,
+          invoice: {
+            id: invoice.id,
+            invoice_number: invoice.invoice_number,
+            amount: invoice.amount,
+            description: invoice.description,
+          },
+        },
+        config: MidtransService.getSnapConfig(),
+      });
+    } catch (error) {
+      console.error("Error creating Snap transaction:", error);
+      res.status(500).json({
+        success: false,
+        message: "Error creating payment transaction",
+        error: error.message,
+      });
+    }
+  }
+
+  // Midtrans webhook/callback handler
+  static async midtransWebhook(req, res) {
+    try {
+      console.log("📩 Midtrans webhook received:", req.body);
+
+      // Handle notification
+      const result = await MidtransService.handleNotification(req.body);
+
+      if (result.success) {
+        console.log(
+          `✅ Payment ${result.paymentId} updated to status: ${result.status}`,
+        );
+        res.status(200).json({
+          success: true,
+          message: "Notification processed successfully",
+          data: result,
+        });
+      } else {
+        res.status(400).json({
+          success: false,
+          message: "Failed to process notification",
+          error: result.error,
+        });
+      }
+    } catch (error) {
+      console.error("❌ Error processing webhook:", error);
+      res.status(500).json({
+        success: false,
+        message: "Error processing webhook",
+        error: error.message,
+      });
+    }
+  }
+
+  // Check payment status
+  static async checkPaymentStatus(req, res) {
+    try {
+      const { order_id } = req.params;
+
+      if (!order_id) {
+        return res.status(400).json({
+          success: false,
+          message: "Order ID is required",
+        });
+      }
+
+      // Find payment
+      const payment = await PaymentService.getPaymentByOrderId(order_id);
+
+      if (!payment) {
+        return res.status(404).json({
+          success: false,
+          message: "Payment not found",
+        });
+      }
+
+      // Check with Midtrans for latest status
+      const statusCheck =
+        await MidtransService.checkTransactionStatus(order_id);
+
+      if (statusCheck.success && statusCheck.status !== payment.status) {
+        // Status changed, update payment via notification
+        const notification = {
+          order_id,
+          transaction_status: statusCheck.status,
+          transaction_id: statusCheck.data.transaction_id,
+          payment_type: payment.payment_method,
+          gross_amount: payment.amount.toString(),
+          fraud_status: statusCheck.data.fraud_status || "accept",
+        };
+
+        await MidtransService.handleNotification(notification);
+
+        // Refresh payment data
+        payment = await PaymentService.getPaymentByOrderId(order_id);
+      }
+
+      res.json({
+        success: true,
+        data: {
+          paymentId: payment.id,
+          orderId: payment.order_id,
+          status: payment.status,
+          amount: payment.amount,
+          paidAt: payment.paid_at,
+        },
+        midtrans_status: statusCheck.data,
+      });
+    } catch (error) {
+      console.error("❌ Error checking payment status:", error);
+      res.status(500).json({
+        success: false,
+        message: "Error checking payment status",
+        error: error.message,
+      });
+    }
+  }
+
+  // Get Snap configuration
+  static async getSnapConfig(req, res) {
+    try {
+      const config = MidtransService.getSnapConfig();
+      res.json({
+        success: true,
+        data: config,
+      });
+    } catch (error) {
+      console.error("❌ Error getting Snap config:", error);
+      res.status(500).json({
+        success: false,
+        message: "Error getting payment configuration",
+        error: error.message,
+      });
+    }
+  }
+
+  // Get customer payments
+  static async getCustomerPayments(req, res) {
+    try {
+      const { customer_id } = req.params;
+      const { limit = 50, page = 1 } = req.query;
+
+      const payments = await PaymentService.getCustomerPayments(
+        customer_id,
+        page,
+        limit,
+      );
+
+      res.json({
+        success: true,
+        data: payments.data,
+        total: payments.total,
+        page: parseInt(page),
+        totalPages: Math.ceil(payments.total / limit),
+      });
+    } catch (error) {
+      console.error("❌ Error fetching customer payments:", error);
+      res.status(500).json({
+        success: false,
+        message: "Error fetching payments",
+        error: error.message,
+      });
+    }
+  }
+
+  // Manual verify payment (for testing/admin)
+  static async manualVerifyPayment(req, res) {
+    try {
+      const { payment_id } = req.params;
+
+      const payment = await PaymentService.getPaymentById(payment_id);
+      if (!payment) {
+        return res.status(404).json({
+          success: false,
+          message: "Payment not found",
+        });
+      }
+
+      if (!payment.order_id) {
+        return res.status(400).json({
+          success: false,
+          message: "Order ID not found",
+        });
+      }
+
+      // Check status with Midtrans
+      const statusCheck = await MidtransService.checkTransactionStatus(
+        payment.order_id,
+      );
+
+      if (statusCheck.success) {
+        // Update based on status
+        const notification = {
+          order_id: payment.order_id,
+          transaction_status: statusCheck.status,
+          transaction_id: statusCheck.data.transaction_id,
+          payment_type: payment.payment_method,
+          gross_amount: payment.amount.toString(),
+          fraud_status: statusCheck.data.fraud_status || "accept",
+        };
+
+        await MidtransService.handleNotification(notification);
+
+        // Refresh payment
+        const updatedPayment = await PaymentService.getPaymentById(payment_id);
+
+        res.json({
+          success: true,
+          message: "Payment verified",
+          data: {
+            payment: updatedPayment,
+            midtrans_status: statusCheck.data,
+          },
+        });
+      } else {
+        res.status(500).json({
+          success: false,
+          message: "Failed to verify payment",
+          error: statusCheck.error,
+        });
+      }
+    } catch (error) {
+      console.error("❌ Error verifying payment:", error);
+      res.status(500).json({
+        success: false,
+        message: "Error verifying payment",
+        error: error.message,
+      });
+    }
+  }
+
+  // Create manual payment (for cash, transfer, etc.)
+  static async createManualPayment(req, res) {
+    try {
+      const {
+        invoice_id,
+        customer_id,
+        amount,
+        payment_method,
+        reference,
+        notes,
+      } = req.body;
+
+      if (!invoice_id || !customer_id || !amount || !payment_method) {
+        return res.status(400).json({
+          success: false,
+          message:
+            "Invoice ID, customer ID, amount, and payment method are required",
+        });
+      }
+
+      const paymentData = {
+        invoice_id,
+        customer_id,
+        amount,
+        payment_method,
+        reference,
+        notes,
+        status: "paid",
+        paid_at: new Date(),
+      };
+
+      const payment = await PaymentService.createPayment(paymentData);
+
+      // Update invoice status
+      await PaymentService.updateInvoiceStatus(invoice_id, "paid");
+
+      res.json({
+        success: true,
+        message: "Manual payment created successfully",
+        data: payment,
+      });
+    } catch (error) {
+      console.error("❌ Error creating manual payment:", error);
+      res.status(500).json({
+        success: false,
+        message: "Error creating payment",
+        error: error.message,
+      });
+    }
+  }
+
+  // Get payment methods
+  static async getPaymentMethods(req, res) {
+    try {
+      const methods = [
+        {
+          id: "midtrans",
+          name: "Online Payment (Midtrans)",
+          description: "Bayar via berbagai metode online",
+          icon: "💳",
+        },
+        {
+          id: "cash",
+          name: "Tunai",
+          description: "Bayar langsung di loket",
+          icon: "💰",
+        },
+        {
+          id: "transfer",
+          name: "Transfer Bank",
+          description: "Transfer ke rekening bank",
+          icon: "🏦",
+        },
+        {
+          id: "qris",
+          name: "QRIS",
+          description: "Scan QR code untuk pembayaran",
+          icon: "📱",
+        },
+        {
+          id: "gopay",
+          name: "GoPay",
+          description: "Bayar via GoPay",
+          icon: "🟢",
+        },
+        { id: "ovo", name: "OVO", description: "Bayar via OVO", icon: "🟣" },
+        { id: "dana", name: "DANA", description: "Bayar via DANA", icon: "🔵" },
+      ];
+
+      res.json({
+        success: true,
+        data: methods,
+      });
+    } catch (error) {
+      console.error("❌ Error getting payment methods:", error);
+      res.status(500).json({
+        success: false,
+        message: "Error getting payment methods",
+        error: error.message,
+      });
     }
   }
 }

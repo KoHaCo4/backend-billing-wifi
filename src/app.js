@@ -14,11 +14,15 @@ const jobRoutes = require("./routes/job.routes");
 const invoiceRoutes = require("./routes/invoice.routes");
 const statsRoutes = require("./routes/stats.routes");
 const suspensionRoutes = require("./routes/suspension.routes");
-const testRoutes = require("./routes/test.routes");
 const healtRoutes = require("./routes/health.routes");
 const settingsRoutes = require("./routes/settings.routes");
 const dashboardRoutes = require("./routes/dashboard.routes");
 const paymentRoutes = require("./routes/payment.routes");
+const customerReminderRoutes = require("./routes/customerReminder.routes");
+const customerReminderJob = require("./jobs/customerReminder");
+const notificationRoutes = require("./routes/notification.routes");
+const monitoringRoutes = require("./routes/monitoring.routes");
+const testRoutes = require("./routes/test.routes");
 
 const app = express();
 
@@ -29,7 +33,7 @@ const allowedOrigins = [
   "https://frontend-billing-wifi.vercel.app", // DOMAIN VERCEL ANDA
   "https://*.vercel.app", // Allow semua subdomain Vercel
   "http://localhost:3000",
-  "http://localhost:3001",
+  "http://localhost:8080",
   "https://billing.fstnews.my.id",
 ];
 
@@ -60,6 +64,10 @@ const corsOptions = {
     "X-Requested-With",
     "Accept",
     "Origin",
+    "Cache-Control", // TAMBAHKAN INI
+    "Pragma", // TAMBAHKAN INI
+    "Expires", // TAMBAHKAN INI
+    "If-Modified-Since", // TAMBAHKAN INI
   ],
   exposedHeaders: ["Content-Range", "X-Content-Range"],
   maxAge: 86400,
@@ -97,8 +105,14 @@ app.use("/api/health", healtRoutes);
 app.use("/api/settings", settingsRoutes);
 app.use("/api/dashboard", dashboardRoutes);
 app.use("/api/payments", paymentRoutes);
-// Tambahkan di app.js setelah routes lainnya
+app.use("/api/customer-reminder", customerReminderRoutes);
+app.use("/api/notifications", notificationRoutes);
+app.use("/api/monitoring", monitoringRoutes);
 app.use("/api/test", testRoutes);
+
+if (process.env.NODE_ENV !== "test") {
+  customerReminderJob.start();
+}
 
 // Health check
 app.get("/api/health", (req, res) => {

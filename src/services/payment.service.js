@@ -1,9 +1,9 @@
 const db = require("../config/database");
 const logger = require("../utils/logger");
+const { Invoice, Customer, Package } = require("../models"); // Import model jika perlu
 
 class PaymentService {
   // Get all payments dengan JOIN ke invoices dan customers
-  // services/payment.service.js - Perbaiki query
   static async getPayments(filters = {}, page = 1, limit = 50) {
     try {
       console.log(
@@ -60,7 +60,6 @@ class PaymentService {
       console.log(`📝 SQL WHERE clause: ${whereClause}`);
       console.log(`📝 SQL params:`, params);
 
-      // PERBAIKAN: Gunakan query yang lebih sederhana dulu untuk test
       const [payments] = await db.query(
         `SELECT 
         p.*,
@@ -254,6 +253,324 @@ class PaymentService {
       };
     } catch (error) {
       logger.error("Get payment statistics error:", error);
+      throw error;
+    }
+  }
+
+  // ============ MIDTRANS SUPPORT METHODS ============
+
+  // Get payment by order ID (for Midtrans)
+  static async getPaymentByOrderId(orderId) {
+    try {
+      const [payments] = await db.query(
+        `SELECT p.*, i.invoice_number, i.status as invoice_status
+         FROM payments p
+         LEFT JOIN invoices i ON p.invoice_id = i.id
+         WHERE p.reference = ? OR p.order_id = ?`,
+        [orderId, orderId],
+      );
+
+      if (payments.length === 0) {
+        throw new Error("Payment not found");
+      }
+
+      return payments[0];
+    } catch (error) {
+      logger.error("Get payment by order ID error:", error);
+      throw error;
+    }
+  }
+
+  // Get pending payment by invoice ID
+  static async getPendingPaymentByInvoiceId(invoiceId) {
+    try {
+      const [payments] = await db.query(
+        `SELECT * FROM payments 
+         WHERE invoice_id = ? AND status = 'pending'
+         ORDER BY created_at DESC 
+         LIMIT 1`,
+        [invoiceId],
+      );
+
+      return payments[0] || null;
+    } catch (error) {
+      logger.error("Get pending payment error:", error);
+      throw error;
+    }
+  }
+
+  // Create new payment
+  static async createPayment(paymentData) {
+    try {
+      const {
+        invoice_id,
+        customer_id,
+        amount,
+        payment_method = "midtrans",
+        status = "pending",
+        reference,
+        notes,
+        order_id,
+        payment_token,
+        payment_url,
+        midtrans_response,
+        created_by,
+        paid_at,
+      } = paymentData;
+
+      // First, check if invoice exists
+      const [invoice] = await db.query(
+        "SELECT id, invoice_number FROM invoices WHERE id = ?",
+        [invoice_id],
+      );
+
+      if (invoice.length === 0) {
+        throw new Error("Invoice not found");
+      }
+
+      const query = `
+        INSERT INTO payments (
+          invoice_id, customer_id, amount, payment_method, status,
+          reference, notes, order_id, payment_token, payment_url,
+          midtrans_response, created_by, paid_at, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())
+      `;
+
+      const [result] = await db.query(query, [
+        invoice_id,
+        customer_id,
+        amount,
+        payment_method,
+        status,
+        reference,
+        notes,
+        order_id,
+        payment_token,
+        payment_url,
+        midtrans_response ? JSON.stringify(midtrans_response) : null,
+        created_by,
+        paid_at,
+      ]);
+
+      console.log(`✅ Payment created with ID: ${result.insertId}`);
+
+      // Return the created payment
+      return await this.getPaymentById(result.insertId);
+    } catch (error) {
+      logger.error("Create payment error:", error);
+      throw error;
+    }
+  }
+
+  // Update payment
+  static async updatePayment(id, updateData) {
+    try {
+      const fields = [];
+      const values = [];
+
+      Object.keys(updateData).forEach((key) => {
+        if (updateData[key] !== undefined) {
+          // Handle JSON fields
+          if (key === "midtrans_response") {
+            fields.push(`${key} = ?`);
+            values.push(JSON.stringify(updateData[key]));
+          } else {
+            fields.push(`${key} = ?`);
+            values.push(updateData[key]);
+          }
+        }
+      });
+
+      if (fields.length === 0) {
+        return await this.getPaymentById(id);
+      }
+
+      const query = `
+        UPDATE payments 
+        SET ${fields.join(", ")}
+        WHERE id = ?
+      `;
+
+      values.push(id);
+
+      await db.query(query, values);
+
+      console.log(`✅ Payment ${id} updated`);
+
+      return await this.getPaymentById(id);
+    } catch (error) {
+      logger.error("Update payment error:", error);
+      throw error;
+    }
+  }
+
+  // Update invoice status when payment is successful
+  static async updateInvoiceStatus(invoiceId, status) {
+    try {
+      const query = `
+        UPDATE invoices 
+        SET status = ?, 
+            paid_date = CASE WHEN ? = 'paid' THEN CURDATE() ELSE paid_date END,
+            updated_at = NOW()
+        WHERE id = ?
+      `;
+
+      await db.query(query, [status, status, invoiceId]);
+
+      console.log(`✅ Invoice ${invoiceId} status updated to ${status}`);
+
+      return true;
+    } catch (error) {
+      logger.error("Update invoice status error:", error);
+      throw error;
+    }
+  }
+
+  // Get customer payments
+  static async getCustomerPayments(customerId, page = 1, limit = 50) {
+    try {
+      const offset = (page - 1) * limit;
+
+      const [payments] = await db.query(
+        `SELECT 
+          p.*,
+          i.invoice_number,
+          i.description as invoice_description,
+          i.due_date,
+          i.status as invoice_status
+         FROM payments p
+         LEFT JOIN invoices i ON p.invoice_id = i.id
+         WHERE p.customer_id = ?
+         ORDER BY p.created_at DESC
+         LIMIT ? OFFSET ?`,
+        [customerId, parseInt(limit), parseInt(offset)],
+      );
+
+      const [[{ total }]] = await db.query(
+        `SELECT COUNT(*) as total FROM payments WHERE customer_id = ?`,
+        [customerId],
+      );
+
+      const formattedPayments = payments.map((payment) => ({
+        id: payment.id,
+        invoice_id: payment.invoice_id,
+        invoice_number: payment.invoice_number,
+        invoice_description: payment.invoice_description,
+        due_date: payment.due_date,
+        invoice_status: payment.invoice_status,
+        amount: parseFloat(payment.amount) || 0,
+        status: payment.status,
+        payment_method: payment.payment_method,
+        reference: payment.reference,
+        order_id: payment.order_id,
+        created_at: payment.created_at,
+        paid_at: payment.paid_at,
+      }));
+
+      return {
+        data: formattedPayments,
+        total: total || 0,
+        page: parseInt(page),
+        limit: parseInt(limit),
+        pages: Math.ceil(total / limit),
+      };
+    } catch (error) {
+      logger.error("Get customer payments error:", error);
+      throw error;
+    }
+  }
+
+  // Mark invoice as paid manually
+  static async markInvoiceAsPaid(invoiceId, paymentData) {
+    try {
+      const {
+        payment_method = "cash",
+        reference = "",
+        notes = "",
+        created_by = null,
+      } = paymentData;
+
+      // Get invoice details
+      const [invoices] = await db.query(
+        `SELECT i.*, c.id as customer_id 
+         FROM invoices i
+         LEFT JOIN customers c ON i.customer_id = c.id
+         WHERE i.id = ?`,
+        [invoiceId],
+      );
+
+      if (invoices.length === 0) {
+        throw new Error("Invoice not found");
+      }
+
+      const invoice = invoices[0];
+
+      // Create payment record
+      const payment = await this.createPayment({
+        invoice_id: invoiceId,
+        customer_id: invoice.customer_id,
+        amount: invoice.amount,
+        payment_method,
+        status: "completed",
+        reference,
+        notes,
+        created_by,
+        paid_at: new Date(),
+      });
+
+      // Update invoice status
+      await this.updateInvoiceStatus(invoiceId, "paid");
+
+      console.log(`✅ Invoice ${invoiceId} marked as paid`);
+
+      return payment;
+    } catch (error) {
+      logger.error("Mark invoice as paid error:", error);
+      throw error;
+    }
+  }
+
+  // Get payment methods statistics
+  static async getPaymentMethodsStats() {
+    try {
+      const [methods] = await db.query(`
+        SELECT 
+          payment_method,
+          COUNT(*) as total_count,
+          SUM(amount) as total_amount,
+          SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) as completed_count,
+          SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END) as pending_count,
+          SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) as failed_count
+        FROM payments 
+        GROUP BY payment_method
+        ORDER BY total_amount DESC
+      `);
+
+      return methods;
+    } catch (error) {
+      logger.error("Get payment methods stats error:", error);
+      throw error;
+    }
+  }
+
+  // Cleanup expired payments (cron job)
+  static async cleanupExpiredPayments() {
+    try {
+      const twentyFourHoursAgo = new Date(Date.now() - 24 * 60 * 60 * 1000);
+
+      const [result] = await db.query(
+        `UPDATE payments 
+         SET status = 'failed', notes = CONCAT(IFNULL(notes, ''), ' - Payment expired')
+         WHERE status = 'pending' 
+         AND created_at < ?`,
+        [twentyFourHoursAgo],
+      );
+
+      console.log(`🧹 Cleaned up ${result.affectedRows} expired payments`);
+
+      return result.affectedRows;
+    } catch (error) {
+      logger.error("Cleanup expired payments error:", error);
       throw error;
     }
   }

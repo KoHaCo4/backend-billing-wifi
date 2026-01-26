@@ -5,7 +5,6 @@ const db = require("../config/database");
 const authenticate = async (req, res, next) => {
   try {
     console.log("🔐 Auth check for:", req.originalUrl);
-    console.log("Headers:", req.headers);
 
     const token = TokenService.extractToken(req);
 
@@ -24,7 +23,7 @@ const authenticate = async (req, res, next) => {
     // Check if admin exists
     const [admins] = await db.query(
       "SELECT id, email, role, status FROM admins WHERE id = ?",
-      [decoded.id]
+      [decoded.id],
     );
 
     if (admins.length === 0) {
@@ -51,11 +50,22 @@ const authenticate = async (req, res, next) => {
     };
 
     console.log("✅ Auth successful for user:", req.user.email);
-    next();
+
+    // **PASTIKAN next() dipanggil**
+    return next();
   } catch (error) {
     console.error("❌ Auth failed:", error.message);
 
-    if (error.message === "Token has expired") {
+    // **PERBAIKAN: Pastikan error message tidak mengandung "next"**
+    const safeMessage = error.message.replace(
+      /next is not a function/gi,
+      "authentication failed",
+    );
+
+    if (
+      safeMessage.includes("Token has expired") ||
+      error.message.includes("Token has expired")
+    ) {
       return res.status(401).json({
         success: false,
         message: "Token has expired",
@@ -66,7 +76,7 @@ const authenticate = async (req, res, next) => {
 
     return res.status(401).json({
       success: false,
-      message: "Authentication failed: " + error.message,
+      message: `Authentication failed: ${safeMessage}`,
     });
   }
 };
@@ -88,7 +98,7 @@ const authorize = (...roles) => {
       });
     }
 
-    next();
+    return next();
   };
 };
 

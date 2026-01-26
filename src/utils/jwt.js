@@ -1,4 +1,3 @@
-// utils/jwt.js atau utils/TokenService.js
 const jwt = require("jsonwebtoken");
 
 class TokenService {
@@ -6,13 +5,13 @@ class TokenService {
     const accessToken = jwt.sign(
       payload,
       process.env.JWT_ACCESS_SECRET || "access-secret",
-      { expiresIn: process.env.JWT_ACCESS_EXPIRY || "15m" }
+      { expiresIn: process.env.JWT_ACCESS_EXPIRY || "15m" },
     );
 
     const refreshToken = jwt.sign(
       payload,
       process.env.JWT_REFRESH_SECRET || "refresh-secret",
-      { expiresIn: process.env.JWT_REFRESH_EXPIRY || "7d" }
+      { expiresIn: process.env.JWT_REFRESH_EXPIRY || "7d" },
     );
 
     return { accessToken, refreshToken };
@@ -20,18 +19,46 @@ class TokenService {
 
   static verifyToken(token, type = "access") {
     try {
+      console.log(`🔑 Verifying ${type} token: ${token.substring(0, 20)}...`);
+
       const secret =
         type === "access"
           ? process.env.JWT_ACCESS_SECRET || "access-secret"
           : process.env.JWT_REFRESH_SECRET || "refresh-secret";
 
-      return jwt.verify(token, secret);
+      const decoded = jwt.verify(token, secret);
+      console.log(`✅ ${type} token verified successfully`);
+      return decoded;
     } catch (error) {
-      throw new Error(`Invalid ${type} token: ${error.message}`);
+      console.error(`❌ ${type} token verification failed:`, error.message);
+
+      // **PERBAIKAN DISINI: Jangan biarkan error.message mengandung "next"**
+      let userMessage;
+
+      if (error.name === "TokenExpiredError") {
+        userMessage = "Token has expired";
+      } else if (error.name === "JsonWebTokenError") {
+        if (error.message.includes("invalid signature")) {
+          userMessage = "Invalid token signature";
+        } else if (error.message.includes("jwt malformed")) {
+          userMessage = "Malformed token";
+        } else if (error.message.includes("invalid token")) {
+          userMessage = "Invalid token";
+        } else {
+          // Hapus kata "next" dari error message jika ada
+          userMessage = error.message.replace(/next/gi, "").trim();
+        }
+      } else {
+        // Hapus kata "next" dari error message
+        userMessage =
+          error.message.replace(/next/gi, "").trim() ||
+          "Token verification failed";
+      }
+
+      throw new Error(userMessage);
     }
   }
 
-  // Tambahkan fungsi extractToken ini
   static extractToken(req) {
     const authHeader = req.headers.authorization;
 

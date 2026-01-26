@@ -676,6 +676,127 @@ class MikrotikService {
       }
     }
   }
+  async getActivePPPoESessions() {
+    let client = null;
+    try {
+      client = await this.connect();
+
+      // Get active PPPoE sessions
+      const sessions = await client.write("/ppp/active/print", [
+        "?service=pppoe",
+      ]);
+
+      console.log(`📡 Found ${sessions.length} active PPPoE sessions`);
+
+      // Format data dengan field yang lebih konsisten
+      return sessions.map((session) => ({
+        username: session.name, // PPPoE username
+        address: session.address || "Unknown",
+        remote_address: session.address || "Unknown",
+        caller_id:
+          session["caller-id"] || session["remote-address"] || "Unknown",
+        uptime: session.uptime || "0s",
+        bytes_in: session["bytes-in"] || "0",
+        bytes_out: session["bytes-out"] || "0",
+        service: session.service || "pppoe",
+        session_id: session["=.id"] || null,
+      }));
+    } catch (error) {
+      console.error("❌ Failed to get active PPPoE sessions:", error.message);
+      throw error;
+    } finally {
+      if (client) {
+        try {
+          await client.close();
+        } catch (closeError) {
+          console.warn("Failed to close connection:", closeError.message);
+        }
+      }
+    }
+  }
+
+  /**
+   * Get all PPPoE users (secret) for reference
+   */
+  async getAllPPPoEUsersDetailed() {
+    let client = null;
+    try {
+      client = await this.connect();
+
+      const users = await client.write("/ppp/secret/print");
+
+      const formattedUsers = users.map((user) => ({
+        username: user.name,
+        service: user.service,
+        profile: user.profile,
+        comment: user.comment || "",
+        disabled: user.disabled === "true",
+        last_logged_out: user["last-logged-out"] || null,
+        caller_id: user["caller-id"] || null,
+        remote_address: user["remote-address"] || null,
+        local_address: user["local-address"] || null,
+      }));
+
+      console.log(`✅ Found ${formattedUsers.length} PPPoE users in secrets`);
+      return formattedUsers;
+    } catch (error) {
+      console.error("❌ Failed to get PPPoE users:", error.message);
+      throw error;
+    } finally {
+      if (client) {
+        try {
+          await client.close();
+        } catch (closeError) {
+          console.warn("Failed to close connection:", closeError.message);
+        }
+      }
+    }
+  }
+
+  /**
+   * Disconnect active PPPoE session by username
+   */
+  async disconnectPPPoESession(username) {
+    let client = null;
+    try {
+      client = await this.connect();
+
+      // Find active session
+      const sessions = await client.write("/ppp/active/print", [
+        `?name=${username}`,
+      ]);
+
+      if (sessions.length === 0) {
+        return {
+          success: false,
+          message: `No active session found for ${username}`,
+        };
+      }
+
+      const sessionId = sessions[0]["=.id"];
+
+      // Remove the session
+      await client.write("/ppp/active/remove", [`=.id=${sessionId}`]);
+
+      console.log(`✅ Disconnected PPPoE session for: ${username}`);
+
+      return {
+        success: true,
+        message: `Session disconnected for ${username}`,
+      };
+    } catch (error) {
+      console.error(`❌ Failed to disconnect session:`, error.message);
+      throw error;
+    } finally {
+      if (client) {
+        try {
+          await client.close();
+        } catch (closeError) {
+          console.warn("Failed to close connection:", closeError.message);
+        }
+      }
+    }
+  }
 
   // Get PPPoE active sessions
   async getPPPoEActiveSessions() {
