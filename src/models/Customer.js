@@ -4,40 +4,46 @@ class Customer {
   static async findExpiringInDays(days) {
     try {
       console.log(
-        `🔍 Mencari pelanggan yang akan expired dalam ${days} hari...`,
+        `🔍 Mencari pelanggan yang akan expired dalam ${days} hari LAGI...`,
       );
 
+      // PERBAIKAN: Cari pelanggan yang TINGGAL X hari lagi sebelum expired
+      // Jika days=1 -> tinggal 1 hari lagi (besok expired)
+      // Jika days=3 -> tinggal 3 hari lagi (3 hari lagi expired)
       const query = `
-      SELECT 
-        c.id,
-        c.name,
-        c.phone,
-        c.address,
-        c.expired_at,
-        c.status,
-        c.auto_renew,
-        p.id as package_id,
-        p.name as package_name,
-        p.price as package_price,
-        p.duration_days,
-        DATEDIFF(c.expired_at, CURDATE()) as days_left
-      FROM customers c
-      LEFT JOIN packages p ON c.package_id = p.id
-      WHERE DATE(c.expired_at) = DATE(DATE_ADD(CURDATE(), INTERVAL ? DAY))
-      AND c.status = 'active'
-      AND c.phone IS NOT NULL
-      AND TRIM(c.phone) != ''
-      AND c.phone != '0'
-      AND (c.reminder_sent IS NULL OR c.reminder_sent = 0)
-      AND (
-        c.phone REGEXP '^[0-9]+$' OR
-        c.phone REGEXP '^\\+[0-9]+$'
-      )
-      ORDER BY c.expired_at ASC
-    `;
+SELECT 
+  c.id,
+  c.name,
+  c.phone,
+  c.address,
+  c.expired_at,
+  c.status,
+  c.auto_renew,
+  c.reminder_sent,
+  c.last_reminder_date,
+  p.id as package_id,
+  p.name as package_name,
+  p.price as package_price,
+  p.duration_days,
+  DATEDIFF(DATE(c.expired_at), CURDATE()) as days_left
+FROM customers c
+LEFT JOIN packages p ON c.package_id = p.id
+WHERE c.status = 'active'
+AND c.expired_at IS NOT NULL
+AND DATE(c.expired_at) = DATE_ADD(CURDATE(), INTERVAL ? DAY)
+AND c.phone IS NOT NULL
+AND TRIM(c.phone) != ''
+AND c.phone != '0'
+AND (
+  c.reminder_sent IS NULL 
+  OR c.reminder_sent = 0
+  OR DATE(c.last_reminder_date) != CURDATE()
+)
+ORDER BY c.expired_at ASC
+`;
 
-      console.log(`📊 Query: ${query.replace(/\s+/g, " ")}`);
-      console.log(`📊 Parameter days: ${days}`);
+      console.log(`📊 Query untuk days=${days}: ${query.replace(/\s+/g, " ")}`);
+      console.log(`📊 Parameter: ${days}`);
 
       const [rows] = await db.execute(query, [days]);
       console.log(`✅ Ditemukan ${rows.length} pelanggan`);
@@ -45,7 +51,7 @@ class Customer {
       // Log detail setiap pelanggan
       rows.forEach((customer, index) => {
         console.log(
-          `${index + 1}. ${customer.name} (${customer.phone}) - Expired: ${customer.expired_at} - Days left: ${customer.days_left}`,
+          `${index + 1}. ${customer.name} (${customer.phone}) - Expired: ${customer.expired_at} - Days left: ${customer.days_left} - Reminder sent: ${customer.reminder_sent} - Last reminder: ${customer.last_reminder_date}`,
         );
       });
 
@@ -301,6 +307,24 @@ class Customer {
     } catch (error) {
       console.error("❌ Debug error:", error.message);
       return [];
+    }
+  }
+
+  static async markReminderSent(customerId) {
+    try {
+      await db.execute(
+        `UPDATE customers 
+       SET reminder_sent = 1,
+           last_reminder_date = NOW(),
+           updated_at = NOW()
+       WHERE id = ?`,
+        [customerId],
+      );
+      console.log(`✅ Marked reminder sent for customer ${customerId}`);
+      return true;
+    } catch (error) {
+      console.error("❌ Error marking reminder sent:", error);
+      return false;
     }
   }
 }

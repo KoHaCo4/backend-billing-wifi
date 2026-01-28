@@ -12,7 +12,7 @@ try {
 }
 
 class InvoiceService {
-  // Create invoice untuk customer extension
+  // Create invoice untuk customer extension (UPDATE dengan payment link)
   static async createInvoiceForExtension(
     customerId,
     subscriptionId,
@@ -27,9 +27,9 @@ class InvoiceService {
       // Get customer info
       const [customers] = await connection.query(
         `SELECT c.*, p.name as package_name, p.duration_days 
-       FROM customers c 
-       JOIN packages p ON c.package_id = p.id 
-       WHERE c.id = ?`,
+         FROM customers c 
+         JOIN packages p ON c.package_id = p.id 
+         WHERE c.id = ?`,
         [customerId],
       );
 
@@ -42,24 +42,16 @@ class InvoiceService {
       const issueDate = new Date().toISOString().split("T")[0];
       const dueDate = InvoiceUtils.calculateDueDate(issueDate, 7);
 
-      // PERBAIKAN: Tambahkan subtotal, tax_amount, discount_amount
-      const subtotal = parseFloat(amount) || 0;
-      const taxAmount = 0;
-      const discountAmount = 0;
-
-      // Create invoice dengan field lengkap
+      // Create invoice
       const [invoiceResult] = await connection.query(
         `INSERT INTO invoices 
-       (invoice_number, customer_id, subscription_id, subtotal, tax_amount, discount_amount,
-        amount, description, status, issue_date, due_date, created_at, updated_at) 
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, NOW(), NOW())`,
+         (invoice_number, customer_id, subscription_id, amount, description, 
+          status, issue_date, due_date, created_at, updated_at) 
+         VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, NOW(), NOW())`,
         [
           invoiceNumber,
           customerId,
           subscriptionId,
-          subtotal, // subtotal
-          taxAmount, // tax_amount
-          discountAmount, // discount_amount
           amount,
           `Pembayaran paket ${customer.package_name} (${customer.duration_days} hari)`,
           issueDate,
@@ -68,6 +60,19 @@ class InvoiceService {
       );
 
       const invoiceId = invoiceResult.insertId;
+
+      // Generate payment link
+      const paymentCode = InvoiceUtils.generatePaymentCode(
+        invoiceId,
+        customerId,
+      );
+      const paymentLink = InvoiceUtils.generatePaymentLink(paymentCode);
+      const expiresAt = InvoiceUtils.calculateExpiryDate(24); // 24 hours
+
+      await connection.query(
+        `UPDATE invoices SET payment_code = ?, payment_link = ?, expires_at = ? WHERE id = ?`,
+        [paymentCode, paymentLink, expiresAt, invoiceId],
+      );
 
       // Update subscription dengan invoice_id
       if (subscriptionId) {
@@ -87,7 +92,7 @@ class InvoiceService {
           "invoice",
           invoiceId,
           invoiceId,
-          `Invoice ${invoiceNumber} created for customer ${customer.name}`,
+          `Invoice ${invoiceNumber} created for customer ${customer.name} with payment link`,
           source,
           adminId === 0 ? null : adminId,
         ],
@@ -105,6 +110,9 @@ class InvoiceService {
         issue_date: issueDate,
         due_date: dueDate,
         status: "pending",
+        payment_code: paymentCode,
+        payment_link: paymentLink,
+        expires_at: expiresAt,
       };
     } catch (error) {
       await connection.rollback();
@@ -115,7 +123,7 @@ class InvoiceService {
     }
   }
 
-  // Create manual invoice
+  // Create manual invoice (UPDATE dengan payment link)
   static async createManualInvoice(invoiceData, items = []) {
     try {
       console.log("📦 Creating invoice with data:", invoiceData);
@@ -134,34 +142,112 @@ class InvoiceService {
 
       console.log(`✅ Confirmed customer: ${customerRows[0].name}`);
 
-      // Insert invoice
-      const invoiceId = await InvoiceUtils.insertInvoice(invoiceData);
+      // Generate invoice number
+      const invoiceNumber = await InvoiceUtils.generateInvoiceNumber();
 
-      // Log activity
-      await ActivityLogService.logActivity({
-        action: "create",
-        entity: "invoice",
-        entity_id: invoiceId,
-        invoice_id: invoiceId,
-        description: `Created invoice ${invoiceData.invoice_number} for ${customerRows[0].name}`,
-        source: "system",
+      if (!invoiceNumber || invoiceNumber.trim() === "") {
+        throw new Error("Failed to generate invoice number");
+      }
+
+      console.log(`✅ Generated invoice number: ${invoiceNumber}`);
+
+      // Prepare dates
+      const issueDate = new Date().toISOString().split("T")[0];
+      const dueDate = new Date();
+      dueDate.setDate(dueDate.getDate() + 7);
+      const dueDateStr = dueDate.toISOString().split("T")[0];
+
+      console.log(`📝 Invoice prepared:`, {
+        invoice_number: invoiceNumber,
+        customer_id: invoiceData.customer_id,
+        amount: invoiceData.amount,
+        issue_date: issueDate,
+        due_date: dueDateStr,
       });
 
-      // Jika ada items, simpan ke invoice_items (jika diperlukan)
-      if (items && items.length > 0) {
-        await this.saveInvoiceItems(invoiceId, items);
-      }
+      // **PERBAIKAN: Query INSERT yang lengkap dan benar**
+      const query = `
+      INSERT INTO invoices (
+        invoice_number, 
+        customer_id, 
+        amount, 
+        subtotal,
+        tax_amount,
+        discount_amount,
+        description,
+        package_id,
+        invoice_type,
+        status, 
+        issue_date, 
+        due_date, 
+        created_by,
+        created_at, 
+        updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())
+    `;
+
+      const values = [
+        invoiceNumber,
+        invoiceData.customer_id,
+        invoiceData.amount,
+        invoiceData.amount, // subtotal sama dengan amount
+        0.0, // tax_amount
+        0.0, // discount_amount
+        invoiceData.description,
+        invoiceData.package_id || null,
+        "regular",
+        "pending",
+        issueDate,
+        dueDateStr,
+        null, // ⚠️ created_by = NULL untuk sistem
+      ];
+
+      console.log("🔍 Executing query:", query.replace(/\s+/g, " "));
+      console.log("🔍 With values:", values);
+
+      const [invoiceResult] = await db.query(query, values);
+      const invoiceId = invoiceResult.insertId;
+      console.log(`✅ Invoice inserted with ID: ${invoiceId}`);
+
+      // Generate payment link
+      const paymentCode = InvoiceUtils.generatePaymentCode(
+        invoiceId,
+        invoiceData.customer_id,
+      );
+      const paymentLink = InvoiceUtils.generatePaymentLink(paymentCode);
+      const expiresAt = InvoiceUtils.calculateExpiryDate(24);
+
+      console.log(`🔗 Payment link generated: ${paymentLink}`);
+
+      await db.query(
+        "UPDATE invoices SET payment_code = ?, payment_link = ?, expires_at = ? WHERE id = ?",
+        [paymentCode, paymentLink, expiresAt, invoiceId],
+      );
+
+      // Get complete invoice data
+      const [invoices] = await db.query("SELECT * FROM invoices WHERE id = ?", [
+        invoiceId,
+      ]);
+
+      const invoice = invoices[0];
 
       return {
         id: invoiceId,
-        invoice_number: invoiceData.invoice_number,
+        invoice_number: invoiceNumber,
         customer_id: invoiceData.customer_id,
-        created_by: invoiceData.created_by,
+        created_by: null,
         amount: invoiceData.amount,
-        message: "Invoice created successfully",
+        payment_code: paymentCode,
+        payment_link: paymentLink,
+        expires_at: expiresAt,
+        issue_date: issueDate,
+        due_date: dueDateStr,
+        status: "pending",
+        message: "Invoice created successfully with payment link",
       };
     } catch (error) {
-      console.error("Create manual invoice error:", error);
+      console.error("❌ Create manual invoice error:", error);
+      console.error("Stack trace:", error.stack);
       throw error;
     }
   }
@@ -1040,6 +1126,350 @@ class InvoiceService {
       throw error;
     } finally {
       connection.release();
+    }
+  }
+
+  // Generate WhatsApp message with payment link
+  static async generateWhatsAppMessage(invoiceId, type = "reminder") {
+    try {
+      const [invoices] = await db.query(
+        `SELECT i.*, c.name as customer_name, c.phone,
+                p.name as package_name, p.price as package_price
+         FROM invoices i
+         LEFT JOIN customers c ON i.customer_id = c.id
+         LEFT JOIN packages p ON i.package_id = p.id
+         WHERE i.id = ?`,
+        [invoiceId],
+      );
+
+      if (invoices.length === 0) {
+        throw new Error("Invoice not found");
+      }
+
+      let invoice = invoices[0];
+
+      // Generate payment link if not exists
+      if (!invoice.payment_code || !invoice.payment_link) {
+        const paymentCode = InvoiceUtils.generatePaymentCode(
+          invoice.id,
+          invoice.customer_id,
+        );
+        const paymentLink = InvoiceUtils.generatePaymentLink(paymentCode);
+        const expiresAt = InvoiceUtils.calculateExpiryDate(24);
+
+        await db.query(
+          "UPDATE invoices SET payment_code = ?, payment_link = ?, expires_at = ? WHERE id = ?",
+          [paymentCode, paymentLink, expiresAt, invoice.id],
+        );
+
+        invoice.payment_code = paymentCode;
+        invoice.payment_link = paymentLink;
+        invoice.expires_at = expiresAt;
+      }
+
+      const formattedAmount = new Intl.NumberFormat("id-ID", {
+        style: "currency",
+        currency: "IDR",
+        minimumFractionDigits: 0,
+      }).format(invoice.amount);
+
+      const dueDate = new Date(invoice.due_date).toLocaleDateString("id-ID", {
+        weekday: "long",
+        year: "numeric",
+        month: "long",
+        day: "numeric",
+      });
+
+      const expiredDate = invoice.expires_at
+        ? new Date(invoice.expires_at).toLocaleDateString("id-ID", {
+            day: "numeric",
+            month: "long",
+            year: "numeric",
+            hour: "2-digit",
+            minute: "2-digit",
+          })
+        : "24 jam";
+
+      let message = "";
+
+      if (type === "reminder") {
+        message = `Halo ${invoice.customer_name} 👋
+
+Masa aktif paket internet Anda akan berakhir dalam *1 hari*
+📅 ${dueDate}
+
+📋 Detail Paket:
+• Paket: ${invoice.package_name}
+• Harga: ${formattedAmount}
+• Expired: ${dueDate}
+
+💳 Bayar Sekarang:
+👉 ${invoice.payment_link}
+
+Silakan klik link di atas untuk melakukan pembayaran online.
+Link akan kadaluarsa pada: ${expiredDate}
+
+Terima kasih 🙏
+VnsNetwork
+📞 081234567890`;
+      } else if (type === "payment_success") {
+        message = `✅ PEMBAYARAN BERHASIL
+
+Halo ${invoice.customer_name},
+
+Terima kasih, pembayaran Anda telah kami terima.
+
+📋 Detail:
+• Invoice: ${invoice.invoice_number}
+• Paket: ${invoice.package_name}
+• Jumlah: ${formattedAmount}
+• Status: ✅ LUNAS
+
+Layanan internet Anda telah aktif kembali 🙏
+
+VnsNetwork
+📞 081234567890`;
+      } else if (type === "payment_failed") {
+        message = `❌ PEMBAYARAN GAGAL
+
+Halo ${invoice.customer_name},
+
+Pembayaran untuk invoice ${invoice.invoice_number} belum berhasil.
+
+Silakan coba lagi melalui link:
+👉 ${invoice.payment_link}
+
+Atau hubungi admin kami untuk bantuan.
+
+VnsNetwork
+📞 081234567890`;
+      }
+
+      return {
+        success: true,
+        data: {
+          message,
+          phone: invoice.phone,
+          payment_link: invoice.payment_link,
+          invoice_number: invoice.invoice_number,
+          expires_at: invoice.expires_at,
+        },
+      };
+    } catch (error) {
+      logger.error("Generate WhatsApp message error:", error);
+      throw error;
+    }
+  }
+
+  // Get invoice by payment code
+  static async getInvoiceByPaymentCode(paymentCode) {
+    try {
+      const invoice = await InvoiceUtils.getInvoiceByPaymentCode(paymentCode);
+      return invoice;
+    } catch (error) {
+      logger.error("Get invoice by payment code error:", error);
+      throw error;
+    }
+  }
+
+  // Validate payment link
+  static async validatePaymentLink(paymentCode) {
+    try {
+      return await InvoiceUtils.validatePaymentLink(paymentCode);
+    } catch (error) {
+      logger.error("Validate payment link error:", error);
+      throw error;
+    }
+  }
+
+  // Update invoice expiry
+  static async updateInvoiceExpiry(invoiceId, hours = 24) {
+    try {
+      const expiresAt = InvoiceUtils.calculateExpiryDate(hours);
+
+      await db.query("UPDATE invoices SET expires_at = ? WHERE id = ?", [
+        expiresAt,
+        invoiceId,
+      ]);
+
+      console.log(`✅ Invoice ${invoiceId} expiry updated to ${expiresAt}`);
+      return expiresAt;
+    } catch (error) {
+      logger.error("Update invoice expiry error:", error);
+      throw error;
+    }
+  }
+
+  // Generate payment link for existing invoice
+  static async generatePaymentLinkForInvoice(invoiceId) {
+    try {
+      // Get invoice
+      const [invoices] = await db.query(
+        "SELECT id, customer_id FROM invoices WHERE id = ?",
+        [invoiceId],
+      );
+
+      if (invoices.length === 0) {
+        throw new Error("Invoice not found");
+      }
+
+      const invoice = invoices[0];
+
+      // Check if already has payment link
+      const [existing] = await db.query(
+        "SELECT payment_code, payment_link FROM invoices WHERE id = ? AND payment_code IS NOT NULL",
+        [invoiceId],
+      );
+
+      if (existing.length > 0) {
+        return {
+          payment_code: existing[0].payment_code,
+          payment_link: existing[0].payment_link,
+        };
+      }
+
+      // Generate new payment link
+      const paymentCode = InvoiceUtils.generatePaymentCode(
+        invoice.id,
+        invoice.customer_id,
+      );
+      const paymentLink = InvoiceUtils.generatePaymentLink(paymentCode);
+      const expiresAt = InvoiceUtils.calculateExpiryDate(24);
+
+      await db.query(
+        "UPDATE invoices SET payment_code = ?, payment_link = ?, expires_at = ? WHERE id = ?",
+        [paymentCode, paymentLink, expiresAt, invoiceId],
+      );
+
+      console.log(
+        `✅ Generated payment link for invoice ${invoiceId}: ${paymentLink}`,
+      );
+
+      return {
+        payment_code: paymentCode,
+        payment_link: paymentLink,
+        expires_at: expiresAt,
+      };
+    } catch (error) {
+      logger.error("Generate payment link for invoice error:", error);
+      throw error;
+    }
+  }
+
+  // Get expired invoices
+  static async getExpiredInvoices() {
+    try {
+      const [invoices] = await db.query(
+        `SELECT i.*, c.name as customer_name, c.phone
+         FROM invoices i
+         LEFT JOIN customers c ON i.customer_id = c.id
+         WHERE i.status = 'pending'
+         AND i.expires_at IS NOT NULL
+         AND i.expires_at < NOW()`,
+        [],
+      );
+
+      return invoices;
+    } catch (error) {
+      logger.error("Get expired invoices error:", error);
+      throw error;
+    }
+  }
+
+  // Mark invoice as expired
+  static async markInvoiceAsExpired(invoiceId) {
+    try {
+      await db.query(
+        'UPDATE invoices SET status = "expired" WHERE id = ? AND status = "pending"',
+        [invoiceId],
+      );
+
+      console.log(`✅ Invoice ${invoiceId} marked as expired`);
+      return true;
+    } catch (error) {
+      logger.error("Mark invoice as expired error:", error);
+      throw error;
+    }
+  }
+
+  // Auto-generate invoices for expiring customers
+  static async autoGenerateInvoicesForExpiringCustomers(daysBefore = 1) {
+    try {
+      logger.info(
+        `🔍 Looking for customers expiring in ${daysBefore} day(s)...`,
+      );
+
+      const [customers] = await db.query(
+        `SELECT c.*, p.name as package_name, p.price
+         FROM customers c
+         LEFT JOIN packages p ON c.package_id = p.id
+         WHERE c.status = 'active'
+         AND DATEDIFF(c.expired_at, CURDATE()) = ?
+         AND NOT EXISTS (
+           SELECT 1 FROM invoices i 
+           WHERE i.customer_id = c.id 
+           AND i.status IN ('pending', 'overdue')
+           AND i.created_at >= DATE_SUB(CURDATE(), INTERVAL 30 DAY)
+         )`,
+        [daysBefore],
+      );
+
+      logger.info(
+        `📊 Found ${customers.length} customers for invoice generation`,
+      );
+
+      const results = [];
+
+      for (const customer of customers) {
+        try {
+          // Generate invoice
+          const invoice = await this.createInvoiceForExtension(
+            customer.id,
+            null, // subscriptionId (null for new)
+            customer.price,
+            0, // system admin
+          );
+
+          // Generate WhatsApp message
+          const whatsappMessage = await this.generateWhatsAppMessage(
+            invoice.id,
+            "reminder",
+          );
+
+          results.push({
+            customer_id: customer.id,
+            customer_name: customer.name,
+            invoice_id: invoice.id,
+            invoice_number: invoice.invoice_number,
+            payment_link: invoice.payment_link,
+            whatsapp_message: whatsappMessage.data.message,
+            success: true,
+          });
+
+          logger.info(
+            `✅ Generated invoice for ${customer.name}: ${invoice.invoice_number}`,
+          );
+
+          // Small delay to avoid rate limiting
+          await new Promise((resolve) => setTimeout(resolve, 100));
+        } catch (customerError) {
+          logger.error(
+            `❌ Error processing customer ${customer.id}:`,
+            customerError,
+          );
+          results.push({
+            customer_id: customer.id,
+            customer_name: customer.name,
+            success: false,
+            error: customerError.message,
+          });
+        }
+      }
+
+      return results;
+    } catch (error) {
+      logger.error("Auto generate invoices error:", error);
+      throw error;
     }
   }
 }
