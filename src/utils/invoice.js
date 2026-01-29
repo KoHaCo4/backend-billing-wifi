@@ -215,7 +215,8 @@ class InvoiceUtils {
 
   // Generate payment link
   static generatePaymentLink(paymentCode) {
-    const baseUrl = process.env.FRONTEND_URL || "http://localhost:3000";
+    const baseUrl =
+      process.env.FRONTEND_URL || "https://frontend-billing-wifi.vercel.app";
     return `${baseUrl}/pay/${paymentCode}`;
   }
 
