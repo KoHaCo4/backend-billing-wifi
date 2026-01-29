@@ -48,4 +48,7 @@ router.get("/test-with-auth", authenticate, (req, res) => {
   });
 });
 
+router.get("/whatsapp", settingsController.getWhatsAppSettings);
+router.post("/whatsapp/test", settingsController.testWhatsApp);
+
 module.exports = router;

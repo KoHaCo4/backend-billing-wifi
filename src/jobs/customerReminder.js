@@ -14,45 +14,183 @@ class CustomerReminderJob {
     this.daysBefore = [3, 1]; // H-3 dan H-1
     this.startTime = null;
     this.enablePaymentLinks = process.env.ENABLE_PAYMENT_LINKS === "true";
+    this.whatsappSettings = null;
+    this.adminId = null;
+  }
+  setAdminId(adminId) {
+    this.adminId = adminId;
+    logger.info(`👤 CustomerReminderJob set to admin_id: ${adminId}`);
+  }
+
+  // Tambahkan method untuk load settings dari database
+  async loadWhatsAppSettings() {
+    try {
+      // Jika adminId belum di-set, coba cari dari settings terbaru
+      if (!this.adminId) {
+        // Ambil settings terbaru dari database (tanpa filter admin_id)
+        const [settings] = await db.query(
+          `SELECT admin_id, settings_json FROM settings ORDER BY updated_at DESC LIMIT 1`,
+        );
+
+        if (settings.length > 0) {
+          this.adminId = settings[0].admin_id;
+          logger.info(`🔍 Auto-detected admin_id: ${this.adminId}`);
+        } else {
+          // Fallback ke admin_id = 1 jika tidak ada settings
+          this.adminId = 1;
+          logger.warn("⚠️ No settings found, using admin_id = 1 as fallback");
+        }
+      }
+
+      const [settings] = await db.query(
+        `SELECT settings_json FROM settings WHERE admin_id = ? ORDER BY updated_at DESC LIMIT 1`,
+        [this.adminId],
+      );
+
+      if (settings.length > 0 && settings[0].settings_json) {
+        let settingsData = settings[0].settings_json;
+
+        // Parse jika string
+        if (typeof settingsData === "string") {
+          settingsData = JSON.parse(settingsData);
+        }
+
+        // Ambil WhatsApp settings
+        this.whatsappSettings = settingsData.whatsapp || {
+          enableReminder: true,
+          reminderSchedule: "0 9,15 * * *",
+          daysBefore: [3, 1],
+          enablePaymentLinks: true,
+          companyName: process.env.COMPANY_NAME || "Billing WiFi",
+          companyPhone: process.env.COMPANY_PHONE || "",
+          paymentLinkExpiryHours: 24,
+        };
+
+        // Update daysBefore dari settings
+        if (
+          this.whatsappSettings.daysBefore &&
+          Array.isArray(this.whatsappSettings.daysBefore)
+        ) {
+          this.daysBefore = this.whatsappSettings.daysBefore;
+        }
+
+        logger.info("✅ WhatsApp settings loaded from database");
+      } else {
+        // Fallback ke default
+        this.whatsappSettings = {
+          enableReminder: true,
+          reminderSchedule: "0 9,15 * * *",
+          daysBefore: [3, 1],
+          enablePaymentLinks: true,
+          companyName: process.env.COMPANY_NAME || "Billing WiFi",
+          companyPhone: process.env.COMPANY_PHONE || "",
+          paymentLinkExpiryHours: 24,
+        };
+        logger.warn("⚠️ No settings found, using default WhatsApp settings");
+      }
+    } catch (error) {
+      logger.error("❌ Error loading WhatsApp settings:", error);
+      // Fallback ke default
+      this.whatsappSettings = {
+        enableReminder: true,
+        reminderSchedule: "0 9,15 * * *",
+        daysBefore: [3, 1],
+        enablePaymentLinks: true,
+        companyName: process.env.COMPANY_NAME || "Billing WiFi",
+        companyPhone: process.env.COMPANY_PHONE || "",
+        paymentLinkExpiryHours: 24,
+      };
+    }
   }
 
   // ===== JOB MANAGEMENT =====
 
   start() {
     try {
-      const schedule =
-        process.env.NODE_ENV === "production"
-          ? "0 9,15 * * *" // Production: jam 09:00 dan 15:00
-          : "*/2 * * * *"; // Development: setiap 10 menit
-
-      logger.info(`⏰ Scheduling customer reminder job: ${schedule}`);
-
-      this.job = cron.schedule(
-        schedule,
-        async () => {
-          if (this.isRunning) {
-            logger.warn("⚠️ Job already running, skipping...");
+      // Load settings dulu
+      this.loadWhatsAppSettings()
+        .then(() => {
+          // Cek apakah reminder diaktifkan
+          if (!this.whatsappSettings.enableReminder) {
+            logger.info("⏸️ WhatsApp reminder is disabled in settings");
             return;
           }
-          logger.info("🚀 ===== STARTING CUSTOMER REMINDER JOB =====");
-          await this.run();
-        },
-        {
-          scheduled: true,
-          timezone: "Asia/Jakarta",
-        },
-      );
 
-      this.startTime = new Date();
-      logger.info(
-        `✅ Customer reminder job started at ${this.startTime.toLocaleString("id-ID")}`,
-      );
+          // Gunakan schedule dari settings
+          const schedule =
+            this.whatsappSettings.reminderSchedule ||
+            (process.env.NODE_ENV === "production"
+              ? "0 9,15 * * *"
+              : "*/2 * * * *");
 
-      // Initial debug check
-      setTimeout(() => {
-        logger.info("🔍 Running initial system check...");
-        this.checkSystemHealth();
-      }, 5000);
+          logger.info(`⏰ Scheduling customer reminder job: ${schedule}`);
+          logger.info(`🌍 Timezone: Asia/Jakarta`);
+          logger.info(
+            `🕒 Current time: ${new Date().toLocaleString("id-ID", { timeZone: "Asia/Jakarta" })}`,
+          );
+
+          // Hentikan job yang ada jika ada
+          if (this.job) {
+            this.job.stop();
+            logger.info("🛑 Stopped previous job");
+          }
+
+          // PASTIKAN: Gunakan node-cron dengan benar
+          this.job = cron.schedule(
+            schedule,
+            () => {
+              const now = new Date();
+              logger.info(
+                `⏰ ===== CRON TRIGGERED at ${now.toLocaleString("id-ID", { timeZone: "Asia/Jakarta" })} =====`,
+              );
+              logger.info(
+                "🚀 Running customer reminder job from cron schedule...",
+              );
+
+              // Jalankan job async tanpa blocking
+              this.run().catch((error) => {
+                logger.error("❌ Error in cron execution:", error);
+              });
+            },
+            {
+              scheduled: true,
+              timezone: "Asia/Jakarta",
+            },
+          );
+
+          this.startTime = new Date();
+          logger.info(
+            `✅ Customer reminder job started at ${this.startTime.toLocaleString("id-ID", { timeZone: "Asia/Jakarta" })}`,
+          );
+
+          // Log next run time
+          try {
+            const cronParser = require("cron-parser");
+            const interval = cronParser.parseExpression(schedule, {
+              currentDate: new Date(),
+              tz: "Asia/Jakarta",
+            });
+            const nextRun = interval.next().toDate();
+            logger.info(
+              `⏭️ Next scheduled run: ${nextRun.toLocaleString("id-ID", { timeZone: "Asia/Jakarta" })}`,
+            );
+          } catch (parseError) {
+            logger.warn(
+              "⚠️ Could not parse next run time:",
+              parseError.message,
+            );
+          }
+
+          // TEST: Jalankan job sekali untuk memastikan berjalan
+          setTimeout(() => {
+            logger.info(
+              "🧪 Test: Job should run in 10 seconds for verification...",
+            );
+          }, 10000);
+        })
+        .catch((error) => {
+          logger.error("❌ Failed to load WhatsApp settings:", error);
+        });
     } catch (error) {
       logger.error("❌ Failed to start customer reminder job:", error);
       throw error;
@@ -472,14 +610,26 @@ ${process.env.COMPANY_NAME || "Billing WiFi"}
 
   // ===== MESSAGE CREATION =====
 
+  // Modifikasi createPaymentLinkMessage untuk pakai settings
   createPaymentLinkMessage(data) {
     const { customer, invoice } = data;
 
+    // TAMBAHKAN INI - Format amount
     const formattedAmount = new Intl.NumberFormat("id-ID", {
       style: "currency",
       currency: "IDR",
       minimumFractionDigits: 0,
     }).format(invoice.amount || 0);
+
+    const companyName =
+      this.whatsappSettings?.companyName ||
+      process.env.COMPANY_NAME ||
+      "VnsNetwork";
+
+    const companyPhone =
+      this.whatsappSettings?.companyPhone ||
+      process.env.COMPANY_PHONE ||
+      "081234567890";
 
     // Jika payment link tidak ada, gunakan pesan regular
     if (!invoice.payment_link) {
@@ -519,18 +669,30 @@ Link akan kadaluarsa pada: ${expiryDate}
 Pembayaran otomatis akan mengaktifkan kembali layanan Anda.
 
 Terima kasih 🙏
-${process.env.COMPANY_NAME || "VnsNetwork"}
-📞 ${process.env.COMPANY_PHONE || "081234567890"}`;
+${companyName}
+📞 ${companyPhone}`;
   }
 
+  // Modifikasi createRegularReminderMessage juga
   createRegularReminderMessage(data) {
     const { customer, invoice } = data;
 
+    // TAMBAHKAN INI - Format amount
     const formattedAmount = new Intl.NumberFormat("id-ID", {
       style: "currency",
       currency: "IDR",
       minimumFractionDigits: 0,
     }).format(invoice.amount || 0);
+
+    const companyName =
+      this.whatsappSettings?.companyName ||
+      process.env.COMPANY_NAME ||
+      "Billing WiFi";
+
+    const companyPhone =
+      this.whatsappSettings?.companyPhone ||
+      process.env.COMPANY_PHONE ||
+      "081234567890";
 
     return `Halo ${customer.name},
 
@@ -551,10 +713,9 @@ Silakan lakukan pembayaran melalui:
 Jika sudah membayar, silakan konfirmasi ke admin.
 
 Terima kasih,
-${process.env.COMPANY_NAME || "Billing WiFi"}
-📞 ${process.env.COMPANY_PHONE || "081234567890"}`;
+${companyName}
+📞 ${companyPhone}`;
   }
-
   // ===== HELPER FUNCTIONS =====
 
   validateCustomer(customer) {
@@ -649,6 +810,34 @@ ${process.env.COMPANY_NAME || "Billing WiFi"}
       console.error("❌ Error resetting reminder flags:", error);
       return 0;
     }
+  }
+
+  // Tambahkan method untuk restart job dengan settings baru
+  async restartWithSettings(newSettings) {
+    logger.info("🔄 Restarting job with new WhatsApp settings");
+
+    // Stop job yang ada
+    if (this.job) {
+      this.job.stop();
+    }
+
+    // Update settings
+    if (newSettings) {
+      this.whatsappSettings = {
+        ...this.whatsappSettings,
+        ...newSettings,
+      };
+
+      // Update daysBefore jika ada
+      if (newSettings.daysBefore && Array.isArray(newSettings.daysBefore)) {
+        this.daysBefore = newSettings.daysBefore;
+      }
+    }
+
+    // Start ulang job
+    this.start();
+
+    logger.info("✅ Job restarted with new settings");
   }
 
   // Auto-disable customers yang sudah expired

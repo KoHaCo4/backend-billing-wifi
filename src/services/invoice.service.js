@@ -1379,15 +1379,33 @@ VnsNetwork
   // Mark invoice as expired
   static async markInvoiceAsExpired(invoiceId) {
     try {
-      await db.query(
-        'UPDATE invoices SET status = "expired" WHERE id = ? AND status = "pending"',
+      logger.info(`⏰ Marking invoice ${invoiceId} as expired`);
+
+      // Cek dulu apakah invoice ada
+      const [invoice] = await db.query(`SELECT * FROM invoices WHERE id = ?`, [
+        invoiceId,
+      ]);
+
+      if (invoice.length === 0) {
+        throw new Error(`Invoice ${invoiceId} not found`);
+      }
+
+      // Update status ke 'expired'
+      const [result] = await db.query(
+        `UPDATE invoices SET status = 'expired', updated_at = NOW() 
+       WHERE id = ? AND status = 'pending'`,
         [invoiceId],
       );
 
-      console.log(`✅ Invoice ${invoiceId} marked as expired`);
-      return true;
+      if (result.affectedRows === 0) {
+        logger.warn(`Invoice ${invoiceId} not found or already updated`);
+      } else {
+        logger.info(`✅ Invoice ${invoiceId} marked as expired`);
+      }
+
+      return result.affectedRows > 0;
     } catch (error) {
-      logger.error("Mark invoice as expired error:", error);
+      logger.error(`Error marking invoice ${invoiceId} as expired:`, error);
       throw error;
     }
   }

@@ -42,6 +42,17 @@ const getDefaultSettings = () => {
       fonnteDeviceId: "",
       fonnteSender: "BillingWifi",
     },
+    whatsapp: {
+      enableReminder: true,
+      reminderSchedule: "0 9,15 * * *", // Default jam 09:00 dan 15:00
+      daysBefore: [3, 1], // H-3 dan H-1
+      enablePaymentLinks: true,
+      testPhoneNumber: "",
+      companyName: "Billing WiFi",
+      companyPhone: "081234567890",
+      paymentLinkExpiryHours: 24,
+      useEnvironmentVars: true, // Gunakan env var atau dari settings
+    },
   };
 };
 
@@ -160,7 +171,80 @@ class SettingsController {
             ...oldData.notifications,
             ...newSettings.notifications,
           },
+          whatsapp: {
+            ...getDefaultSettings().whatsapp,
+            ...oldData.whatsapp,
+            ...newSettings.whatsapp,
+          },
         };
+
+        // VALIDASI WHATSAPP SETTINGS SETELAH MERGE
+        if (finalSettings.whatsapp) {
+          // 1. Pastikan daysBefore adalah array
+          if (!Array.isArray(finalSettings.whatsapp.daysBefore)) {
+            // Coba parse jika string
+            if (typeof finalSettings.whatsapp.daysBefore === "string") {
+              try {
+                finalSettings.whatsapp.daysBefore = JSON.parse(
+                  finalSettings.whatsapp.daysBefore,
+                );
+              } catch (e) {
+                finalSettings.whatsapp.daysBefore = [3, 1]; // Default
+              }
+            } else if (finalSettings.whatsapp.daysBefore === false) {
+              // Jika false, ubah ke array default
+              finalSettings.whatsapp.daysBefore = [3, 1];
+            } else {
+              finalSettings.whatsapp.daysBefore = [3, 1]; // Default
+            }
+          }
+
+          // 2. Pastikan reminderSchedule tidak kosong
+          if (
+            !finalSettings.whatsapp.reminderSchedule ||
+            finalSettings.whatsapp.reminderSchedule.trim() === ""
+          ) {
+            finalSettings.whatsapp.reminderSchedule = "*/2 * * * *"; // Default dev
+            if (process.env.NODE_ENV === "production") {
+              finalSettings.whatsapp.reminderSchedule = "0 9,15 * * *";
+            }
+          }
+
+          // 3. Pastikan paymentLinkExpiryHours angka
+          if (
+            !finalSettings.whatsapp.paymentLinkExpiryHours ||
+            isNaN(parseInt(finalSettings.whatsapp.paymentLinkExpiryHours))
+          ) {
+            finalSettings.whatsapp.paymentLinkExpiryHours = 24; // Default 24 jam
+          } else {
+            finalSettings.whatsapp.paymentLinkExpiryHours = parseInt(
+              finalSettings.whatsapp.paymentLinkExpiryHours,
+            );
+          }
+
+          // 4. Pastikan companyName tidak kosong
+          if (
+            !finalSettings.whatsapp.companyName ||
+            finalSettings.whatsapp.companyName.trim() === ""
+          ) {
+            finalSettings.whatsapp.companyName = "Billing WiFi";
+          }
+
+          // 5. Pastikan enableReminder boolean
+          if (typeof finalSettings.whatsapp.enableReminder !== "boolean") {
+            finalSettings.whatsapp.enableReminder = true;
+          }
+
+          // 6. Pastikan enablePaymentLinks boolean
+          if (typeof finalSettings.whatsapp.enablePaymentLinks !== "boolean") {
+            finalSettings.whatsapp.enablePaymentLinks = true;
+          }
+
+          logger.info(
+            "✅ Validated WhatsApp settings:",
+            finalSettings.whatsapp,
+          );
+        }
 
         logger.info(
           "After merge - general keys:",
@@ -182,6 +266,10 @@ class SettingsController {
           notifications: {
             ...getDefaultSettings().notifications,
             ...newSettings.notifications,
+          },
+          whatsapp: {
+            ...getDefaultSettings().whatsapp,
+            ...newSettings.whatsapp,
           },
         };
       }
@@ -233,6 +321,29 @@ class SettingsController {
         logger.error("❌ Failed to restart scheduler:", err.message);
       }
 
+      // 6. PERBAIKAN INI: Update CustomerReminderJob dengan admin_id yang benar
+      try {
+        const customerReminderJob = require("../jobs/customerReminder");
+
+        // Set admin_id ke job
+        customerReminderJob.setAdminId(req.user.id);
+
+        // Load settings ulang
+        await customerReminderJob.loadWhatsAppSettings();
+
+        // Restart job jika perlu
+        if (customerReminderJob.job) {
+          customerReminderJob.stop();
+          await customerReminderJob.start();
+        } else {
+          await customerReminderJob.start();
+        }
+
+        logger.info("✅ Customer reminder job updated with correct admin_id");
+      } catch (jobError) {
+        logger.warn("⚠️ Failed to update reminder job:", jobError.message);
+      }
+
       res.json({
         success: true,
         message: "Settings saved successfully",
@@ -245,7 +356,6 @@ class SettingsController {
         success: false,
         message: "Failed to save settings",
         error: error.message,
-        stack: process.env.NODE_ENV === "development" ? error.stack : undefined,
       });
     }
   };
@@ -306,6 +416,65 @@ class SettingsController {
       res.status(500).json({
         success: false,
         message: "Health check failed",
+      });
+    }
+  };
+
+  // Get WhatsApp settings
+  getWhatsAppSettings = async (req, res) => {
+    try {
+      const settings = await this.getUserSettings(req.user.id);
+
+      res.json({
+        success: true,
+        data: settings.whatsapp || getDefaultSettings().whatsapp,
+      });
+    } catch (error) {
+      logger.error("Error getting WhatsApp settings:", error);
+      res.status(500).json({
+        success: false,
+        message: "Failed to get WhatsApp settings",
+      });
+    }
+  };
+
+  // Method untuk trigger test WhatsApp
+  testWhatsApp = async (req, res) => {
+    try {
+      const { phone } = req.body;
+
+      if (!phone) {
+        return res.status(400).json({
+          success: false,
+          message: "Phone number is required",
+        });
+      }
+
+      // Panggil customerReminderJob untuk test
+      const customerReminderJob = require("../jobs/customerReminder");
+
+      const result = await customerReminderJob.triggerManual({
+        phone: phone,
+        days: 1,
+        name: "Test Customer",
+        package_name: "Paket Test",
+        amount: 100000,
+      });
+
+      res.json({
+        success: result.status === "success",
+        message:
+          result.status === "success"
+            ? "Test message sent successfully"
+            : "Failed to send test message",
+        data: result,
+      });
+    } catch (error) {
+      logger.error("Error testing WhatsApp:", error);
+      res.status(500).json({
+        success: false,
+        message: "Failed to test WhatsApp",
+        error: error.message,
       });
     }
   };
