@@ -13,7 +13,6 @@ class CustomerReminderJob {
     this.isRunning = false;
     this.daysBefore = [3, 1]; // H-3 dan H-1
     this.startTime = null;
-    this.enablePaymentLinks = process.env.ENABLE_PAYMENT_LINKS === "true";
     this.whatsappSettings = null;
     this.adminId = null;
   }
@@ -355,15 +354,30 @@ class CustomerReminderJob {
 
       const invoice = invoiceResult.invoice;
       console.log(
-        `[${requestId}] Invoice: ${invoice.invoice_number}, Payment Link: ${invoice.payment_link || "NO LINK"}`,
+        `[${requestId}] Final invoice payment link: ${invoice.payment_link || "NO LINK"}`,
       );
 
-      // 4. Create WhatsApp message
-      const messageData = {
+      // 4. DEBUG: Log semua data yang akan dikirim
+      console.log(`[${requestId}] === DEBUG DATA ===`);
+      console.log(`[${requestId}] Customer name: ${customer.name}`);
+      console.log(`[${requestId}] Customer admin_id: ${customer.admin_id}`);
+      console.log(`[${requestId}] Invoice number: ${invoice.invoice_number}`);
+      console.log(
+        `[${requestId}] Invoice payment_link: ${invoice.payment_link}`,
+      );
+      console.log(`[${requestId}] Invoice amount: ${invoice.amount}`);
+
+      // 5. Create WhatsApp message - USE FONNTE SERVICE
+      console.log(
+        `[${requestId}] Calling fonnteService.createPaymentReminderMessage...`,
+      );
+
+      const customerData = {
         customer: {
           id: customer.id,
           name: customer.name,
           phone: phoneNumber,
+          admin_id: customer.admin_id || 3,
           package_name: customer.package_name,
           days_left: daysBefore,
         },
@@ -375,22 +389,44 @@ class CustomerReminderJob {
           expires_at: invoice.expires_at,
           due_date: invoice.due_date,
         },
+        admin_id: customer.admin_id || 3,
+        phone: phoneNumber,
       };
 
-      // ⚠️ PERBAIKAN: Check if payment links are enabled
-      const message =
-        this.enablePaymentLinks && invoice.payment_link
-          ? this.createPaymentLinkMessage(messageData)
-          : this.createRegularReminderMessage(messageData);
-
-      console.log(
-        `[${requestId}] Message type: ${this.enablePaymentLinks && invoice.payment_link ? "WITH PAYMENT LINK" : "REGULAR REMINDER"}`,
-      );
-      console.log(
-        `[${requestId}] Message preview: ${message.substring(0, 100)}...`,
+      const message = await fonnteService.createPaymentReminderMessage(
+        customerData,
+        invoice,
       );
 
-      // 5. Send WhatsApp message
+      console.log(`[${requestId}] Message length: ${message.length}`);
+      console.log(
+        `[${requestId}] First 200 chars: ${message.substring(0, 200)}...`,
+      );
+
+      // 6. Check if message contains payment link
+      const hasPaymentLink =
+        message.includes("payment_link") ||
+        message.includes("http://") ||
+        message.includes("https://") ||
+        message.includes(invoice.payment_link || "");
+
+      console.log(
+        `[${requestId}] Message contains payment link: ${hasPaymentLink}`,
+      );
+      if (hasPaymentLink && invoice.payment_link) {
+        console.log(
+          `[${requestId}] ✅ CONFIRMED: Message contains payment link!`,
+        );
+        console.log(
+          `[${requestId}] Payment link in message: ${invoice.payment_link}`,
+        );
+      } else {
+        console.log(
+          `[${requestId}] ⚠️ WARNING: Message does NOT contain payment link!`,
+        );
+      }
+
+      // 7. Send WhatsApp message
       console.log(`[${requestId}] Sending WhatsApp...`);
       const sendResult = await fonnteService.sendMessage(phoneNumber, message, {
         delay: "2-5",
@@ -402,15 +438,23 @@ class CustomerReminderJob {
         },
       });
 
-      // 6. Update customer reminder status
+      // 8. Update customer reminder status
       if (sendResult.success) {
         console.log(
           `[${requestId}] ✅ WhatsApp sent successfully to ${customer.name}`,
         );
+
+        // Update reminder status
+        await db.query(
+          `UPDATE customers SET reminder_sent = 1, last_reminder_date = NOW() WHERE id = ?`,
+          [customer.id],
+        );
+
         return {
           status: "success",
           invoiceId: invoice.id,
           messageId: sendResult.messageId,
+          hasPaymentLink: hasPaymentLink,
         };
       } else {
         console.error(`[${requestId}] ❌ WhatsApp failed: ${sendResult.error}`);
@@ -527,6 +571,28 @@ ${process.env.COMPANY_NAME || "Billing WiFi"}
 📞 ${process.env.COMPANY_PHONE || "081234567890"}`;
   }
 
+  createSimpleReminderMessage(customer, invoice) {
+    const formattedAmount = new Intl.NumberFormat("id-ID", {
+      style: "currency",
+      currency: "IDR",
+      minimumFractionDigits: 0,
+    }).format(invoice.amount || 0);
+
+    return `Halo ${customer.name},
+
+Masa aktif paket internet Anda akan berakhir dalam beberapa hari.
+
+Detail:
+• Invoice: ${invoice.invoice_number}
+• Paket: ${customer.package_name}
+• Harga: ${formattedAmount}
+• Due Date: ${new Date(invoice.due_date).toLocaleDateString("id-ID")}
+
+Silakan lakukan pembayaran melalui transfer bank.
+
+Terima kasih`;
+  }
+
   async saveNotificationLog(logData) {
     try {
       await db.execute(
@@ -566,41 +632,99 @@ ${process.env.COMPANY_NAME || "Billing WiFi"}
         [customer.id],
       );
 
+      let invoice;
+
       if (existingInvoices.length > 0) {
-        const invoice = existingInvoices[0];
+        invoice = existingInvoices[0];
         console.log(
           `[${requestId}] Menggunakan invoice yang sudah ada: ${invoice.invoice_number}`,
         );
 
-        // ⚠️ PERBAIKAN: Pastikan invoice memiliki payment link
-        if (this.enablePaymentLinks && !invoice.payment_link) {
-          console.log(
-            `[${requestId}] Generating payment link for existing invoice...`,
+        // CEK SETTINGS DULU - HARUS GENERATE PAYMENT LINK JIKA DIAKTIFKAN
+        try {
+          // Get WhatsApp settings dari database
+          const [settings] = await db.query(
+            `SELECT settings_json FROM settings WHERE admin_id = ? ORDER BY updated_at DESC LIMIT 1`,
+            [customer.admin_id || this.adminId || 3],
           );
-          const paymentLinkResult =
-            await InvoiceService.generatePaymentLinkForInvoice(invoice.id);
-          invoice.payment_link = paymentLinkResult.payment_link;
-          invoice.expires_at = paymentLinkResult.expires_at;
-        }
 
-        return { success: true, invoice };
+          let enablePaymentLinks = false;
+          if (settings.length > 0) {
+            const settingsData =
+              typeof settings[0].settings_json === "string"
+                ? JSON.parse(settings[0].settings_json)
+                : settings[0].settings_json;
+            enablePaymentLinks =
+              settingsData.whatsapp?.enablePaymentLinks === true;
+          }
+
+          console.log(
+            `[${requestId}] Settings check - enablePaymentLinks: ${enablePaymentLinks}`,
+          );
+          console.log(
+            `[${requestId}] Invoice has payment link: ${!!invoice.payment_link}`,
+          );
+
+          // Jika payment link diaktifkan TAPI invoice tidak punya payment link
+          if (
+            enablePaymentLinks &&
+            (!invoice.payment_link ||
+              invoice.payment_link === "" ||
+              invoice.payment_link === null)
+          ) {
+            console.log(
+              `[${requestId}] ⚠️ WARNING: Payment links enabled but invoice has NO payment link! Generating...`,
+            );
+
+            try {
+              const paymentLinkResult =
+                await InvoiceService.generatePaymentLinkForInvoice(invoice.id);
+              invoice.payment_link = paymentLinkResult.payment_link;
+              invoice.expires_at = paymentLinkResult.expires_at;
+
+              console.log(
+                `[${requestId}] ✅ Generated payment link: ${invoice.payment_link}`,
+              );
+
+              // Update invoice di database
+              await db.query(
+                `UPDATE invoices SET payment_link = ?, expires_at = ? WHERE id = ?`,
+                [invoice.payment_link, invoice.expires_at, invoice.id],
+              );
+            } catch (generateError) {
+              console.error(
+                `[${requestId}] ❌ Failed to generate payment link:`,
+                generateError,
+              );
+            }
+          }
+        } catch (settingsError) {
+          console.error(
+            `[${requestId}] Error checking settings:`,
+            settingsError,
+          );
+        }
+      } else {
+        console.log(
+          `[${requestId}] Membuat invoice baru untuk ${customer.name}`,
+        );
+
+        const invoiceData = {
+          customer_id: customer.id,
+          amount: customer.package_price || 0,
+          description: `Pembayaran paket ${customer.package_name} - Reminder ${daysBefore} hari`,
+          package_id: customer.package_id,
+        };
+
+        // ⚠️ PERBAIKAN: Gunakan createManualInvoice yang sudah include payment link
+        invoice = await InvoiceService.createManualInvoice(invoiceData);
+
+        console.log(`[${requestId}] Invoice dibuat: ${invoice.invoice_number}`);
+        console.log(
+          `[${requestId}] Payment link: ${invoice.payment_link || "NO LINK"}`,
+        );
       }
 
-      // Create new invoice
-      console.log(`[${requestId}] Membuat invoice baru untuk ${customer.name}`);
-
-      const invoiceData = {
-        customer_id: customer.id,
-        amount: customer.package_price || 0,
-        description: `Pembayaran paket ${customer.package_name} - Reminder ${daysBefore} hari`,
-        package_id: customer.package_id,
-        created_by: 0, // System
-      };
-
-      // ⚠️ PERBAIKAN: Gunakan createManualInvoice yang sudah include payment link
-      const invoice = await InvoiceService.createManualInvoice(invoiceData);
-
-      console.log(`[${requestId}] Invoice dibuat: ${invoice.invoice_number}`);
       return { success: true, invoice };
     } catch (error) {
       console.error(`[${requestId}] Error membuat invoice:`, error);
@@ -716,6 +840,7 @@ Terima kasih,
 ${companyName}
 📞 ${companyPhone}`;
   }
+
   // ===== HELPER FUNCTIONS =====
 
   validateCustomer(customer) {

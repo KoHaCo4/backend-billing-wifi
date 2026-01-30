@@ -7,9 +7,7 @@ class Customer {
         `🔍 Mencari pelanggan yang akan expired dalam ${days} hari LAGI...`,
       );
 
-      // PERBAIKAN: Cari pelanggan yang TINGGAL X hari lagi sebelum expired
-      // Jika days=1 -> tinggal 1 hari lagi (besok expired)
-      // Jika days=3 -> tinggal 3 hari lagi (3 hari lagi expired)
+      // PERBAIKAN: Tambahkan koma setelah c.admin_id
       const query = `
 SELECT 
   c.id,
@@ -21,6 +19,7 @@ SELECT
   c.auto_renew,
   c.reminder_sent,
   c.last_reminder_date,
+  c.admin_id, -- ⚠️ PERBAIKAN: TAMBAHKAN KOMA DI SINI!
   p.id as package_id,
   p.name as package_name,
   p.price as package_price,

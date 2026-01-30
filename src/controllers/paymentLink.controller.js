@@ -25,7 +25,7 @@ class PaymentLinkController {
 
       // Get customer details
       const [customers] = await db.query(
-        "SELECT name, phone, email FROM customers WHERE id = ?",
+        "SELECT name, phone FROM customers WHERE id = ?",
         [invoice.customer_id],
       );
 
@@ -46,7 +46,7 @@ class PaymentLinkController {
           customer: {
             name: customer.name || `Customer ${invoice.customer_id}`,
             phone: customer.phone || "",
-            email: customer.email || "",
+            // email: customer.email || "",
           },
           payment_code,
           is_expired: new Date(invoice.expires_at) < new Date(),
@@ -58,6 +58,7 @@ class PaymentLinkController {
         success: false,
         message: "Error loading payment page",
         error: error.message,
+        sqlError: error.sqlMessage,
       });
     }
   }

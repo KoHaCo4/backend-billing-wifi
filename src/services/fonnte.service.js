@@ -276,6 +276,8 @@
 
 const axios = require("axios");
 const logger = require("../utils/logger");
+const customerReminder = require("../jobs/customerReminder");
+const settingsController = require("../controllers/settings.controller");
 
 class FonnteService {
   constructor() {
@@ -283,6 +285,7 @@ class FonnteService {
     this.apiToken = process.env.FONNTE_API_TOKEN;
     this.retryCount = 0;
     this.maxRetries = 3;
+    this.settingsCache = new Map();
   }
 
   // ===== CORE FUNCTIONS =====
@@ -323,7 +326,6 @@ class FonnteService {
         message: message,
         countryCode: "62",
         delay: options.delay || "2-5",
-        // Add retry tracking
         customData: {
           requestId,
           timestamp: new Date().toISOString(),
@@ -335,13 +337,6 @@ class FonnteService {
       if (options.url) payload.url = options.url;
       if (options.filename) payload.filename = options.filename;
       if (options.schedule) payload.schedule = options.schedule;
-
-      // Log request for debugging
-      logger.debug(`[${requestId}] Payload:`, {
-        target: phoneNumber,
-        messageLength: message.length,
-        options,
-      });
 
       // Send request with retry logic
       const response = await this.makeRequestWithRetry(requestId, payload);
@@ -396,10 +391,9 @@ class FonnteService {
         timeout: 30000,
       });
 
-      this.retryCount = 0; // Reset on success
+      this.retryCount = 0;
       return response;
     } catch (error) {
-      // Check if we should retry
       const retryableErrors = [
         "ETIMEDOUT",
         "ECONNRESET",
@@ -407,7 +401,7 @@ class FonnteService {
         429,
         502,
         503,
-        504, // HTTP codes
+        504,
       ];
 
       const shouldRetry =
@@ -415,7 +409,7 @@ class FonnteService {
         retryableErrors.includes(error.response?.status);
 
       if (shouldRetry && retry < this.maxRetries) {
-        const delay = Math.pow(2, retry) * 1000; // Exponential backoff
+        const delay = Math.pow(2, retry) * 1000;
         logger.warn(
           `[${requestId}] Retry ${retry + 1}/${this.maxRetries} after ${delay}ms`,
         );
@@ -425,6 +419,39 @@ class FonnteService {
       }
 
       throw error;
+    }
+  }
+
+  parseResponse(data, requestId) {
+    if (data.status === true || data.status === "sent") {
+      return {
+        success: true,
+        data: data,
+        messageId: data.id || data.message_id || requestId,
+        status: "sent",
+      };
+    } else if (data.status === "pending") {
+      return {
+        success: true,
+        data: data,
+        messageId: data.id || requestId,
+        status: "pending",
+      };
+    } else if (data.error) {
+      return {
+        success: false,
+        error: data.error,
+        data: data,
+        status: "failed",
+      };
+    } else {
+      logger.warn(`[${requestId}] Unknown response format:`, data);
+      return {
+        success: false,
+        error: "Unknown response format",
+        data: data,
+        status: "unknown",
+      };
     }
   }
 
@@ -474,26 +501,20 @@ class FonnteService {
     if (!phone) return null;
 
     let normalized = phone.toString().trim();
-
-    // Remove all non-digit characters
     normalized = normalized.replace(/\D/g, "");
 
-    // Remove leading zeros
     if (normalized.startsWith("0")) {
       normalized = normalized.substring(1);
     }
 
-    // Remove country code if present
     if (normalized.startsWith("62")) {
       normalized = normalized.substring(2);
     }
 
-    // Remove +62 if present
     if (normalized.startsWith("+62")) {
       normalized = normalized.substring(3);
     }
 
-    // Validate length (Indonesian mobile numbers are 9-13 digits after country code removal)
     if (normalized.length < 9 || normalized.length > 13) {
       logger.warn(
         `Invalid phone length: ${normalized} (${normalized.length} digits)`,
@@ -501,7 +522,6 @@ class FonnteService {
       return null;
     }
 
-    // Check if it's a valid Indonesian mobile prefix
     const validPrefixes = [
       "81",
       "82",
@@ -519,36 +539,159 @@ class FonnteService {
       logger.warn(
         `Invalid Indonesian mobile prefix: ${prefix} for number ${normalized}`,
       );
-      // Still return as it might be valid for other reasons
     }
 
     return normalized;
   }
 
   /**
+   * GET SETTINGS FROM DATABASE
+   */
+  async getWhatsAppSettings(adminId) {
+    try {
+      const cacheKey = `whatsapp_settings_${adminId}`;
+      const cached = this.settingsCache.get(cacheKey);
+
+      if (cached && Date.now() - cached.timestamp < 300000) {
+        // 5 minutes cache
+        return cached.data;
+      }
+
+      const [settings] = await db.query(
+        `SELECT settings_json FROM settings WHERE admin_id = ? ORDER BY updated_at DESC LIMIT 1`,
+        [adminId],
+      );
+
+      if (settings.length === 0) {
+        return {
+          enablePaymentLinks: false,
+          companyName: "Billing WiFi",
+          companyPhone: "",
+          daysBefore: [3, 1],
+        };
+      }
+
+      const settingsData =
+        typeof settings[0].settings_json === "string"
+          ? JSON.parse(settings[0].settings_json)
+          : settings[0].settings_json;
+
+      const whatsappSettings = settingsData.whatsapp || {};
+
+      // DEBUG LOG
+      logger.info(`[SETTINGS] Loaded WhatsApp settings for admin ${adminId}:`, {
+        enablePaymentLinks: whatsappSettings.enablePaymentLinks,
+        companyName: whatsappSettings.companyName,
+        companyPhone: whatsappSettings.companyPhone,
+      });
+
+      this.settingsCache.set(cacheKey, {
+        data: whatsappSettings,
+        timestamp: Date.now(),
+      });
+
+      return whatsappSettings;
+    } catch (error) {
+      logger.error(
+        `Error getting WhatsApp settings for admin ${adminId}:`,
+        error,
+      );
+      return {
+        enablePaymentLinks: false,
+        companyName: "Billing WiFi",
+        companyPhone: "",
+        daysBefore: [3, 1],
+      };
+    }
+  }
+
+  /**
    * Send payment reminder with payment link
    */
   async sendPaymentReminder(customerData, invoiceData) {
-    const message = this.createPaymentReminderMessage(
+    logger.info(
+      `[PAYMENT_REMINDER] Starting for customer: ${customerData.name || customerData.customer?.name}`,
+    );
+
+    // Debug customer data
+    logger.info(`[PAYMENT_REMINDER] Customer data:`, {
+      name: customerData.name || customerData.customer?.name,
+      adminId: customerData.admin_id || customerData.customer?.admin_id,
+      phone: customerData.phone || customerData.customer?.phone,
+    });
+
+    const message = await this.createPaymentReminderMessage(
       customerData,
       invoiceData,
     );
 
-    return await this.sendMessage(customerData.phone, message, {
-      delay: "3-7",
-      customData: {
-        type: "payment_reminder",
-        invoiceId: invoiceData.id,
-        customerId: customerData.id,
+    // Debug message content
+    const hasPaymentLink =
+      message.includes("payment_link") ||
+      message.includes("http://") ||
+      message.includes("https://");
+    logger.info(
+      `[PAYMENT_REMINDER] Message contains payment link: ${hasPaymentLink}`,
+    );
+
+    if (hasPaymentLink) {
+      logger.info(
+        `[PAYMENT_REMINDER] WARNING: Message STILL contains payment link!`,
+      );
+      logger.info(
+        `[PAYMENT_REMINDER] First 200 chars: ${message.substring(0, 200)}`,
+      );
+    }
+
+    return await this.sendMessage(
+      customerData.phone || customerData.customer?.phone,
+      message,
+      {
+        delay: "3-7",
+        customData: {
+          type: "payment_reminder",
+          invoiceId: invoiceData.id,
+          customerId: customerData.id || customerData.customer?.id,
+        },
       },
-    });
+    );
   }
 
   /**
    * Create payment reminder message with payment link
    */
-  createPaymentReminderMessage(customerData, invoiceData) {
-    const { customer, invoice } = customerData;
+  async createPaymentReminderMessage(customerData, invoiceData) {
+    console.log(`🚨 [EMERGENCY FIX] createPaymentReminderMessage called`);
+
+    const customer = customerData.customer || customerData;
+    const invoice = invoiceData || customerData.invoice;
+
+    console.log(`🚨 Customer: ${customer.name}`);
+    console.log(`🚨 Invoice: ${invoice.invoice_number}`);
+    console.log(`🚨 Payment link: ${invoice.payment_link || "NO LINK"}`);
+
+    // HARDCODE: SELALU gunakan payment link jika ada
+    if (invoice.payment_link) {
+      console.log(
+        `🚨 Creating message WITH payment link: ${invoice.payment_link}`,
+      );
+      return this.createPaymentLinkMessage(customer, invoice, {});
+    } else {
+      console.log(`🚨 Creating message WITHOUT payment link`);
+      return this.createRegularReminderMessage(customer, invoice, {});
+    }
+  }
+
+  /**
+   * Create payment link message
+   */
+  createPaymentLinkMessage(customer, invoice, whatsappSettings = {}) {
+    const companyName =
+      whatsappSettings.companyName ||
+      process.env.COMPANY_NAME ||
+      "Billing WiFi";
+    const companyPhone =
+      whatsappSettings.companyPhone || process.env.COMPANY_PHONE || "";
 
     const formattedAmount = new Intl.NumberFormat("id-ID", {
       style: "currency",
@@ -556,38 +699,60 @@ class FonnteService {
       minimumFractionDigits: 0,
     }).format(invoice.amount || 0);
 
-    const expiryDate = invoice.expires_at
-      ? new Date(invoice.expires_at).toLocaleDateString("id-ID", {
-          weekday: "long",
-          day: "numeric",
-          month: "long",
-          year: "numeric",
-          hour: "2-digit",
-          minute: "2-digit",
-        })
-      : "24 jam";
-
     return `Halo ${customer.name} 👋
 
-Masa aktif paket internet Anda akan berakhir dalam *${customerData.days_left} hari*.
+Masa aktif paket internet Anda akan berakhir dalam beberapa hari.
 
 📋 Detail Invoice:
 • Invoice: ${invoice.invoice_number}
 • Paket: ${customer.package_name || "Internet"}
 • Harga: ${formattedAmount}
-• Expired: ${new Date(invoice.due_date).toLocaleDateString("id-ID")}
+• Due Date: ${new Date(invoice.due_date).toLocaleDateString("id-ID")}
 
 💳 BAYAR SEKARANG:
-👉 ${invoice.payment_link || "Link pembayaran tidak tersedia"}
+👉 ${invoice.payment_link}
 
 Silakan klik link di atas untuk melakukan pembayaran online.
-Link akan kadaluarsa pada: ${expiryDate}
-
 Pembayaran otomatis akan mengaktifkan kembali layanan Anda.
 
 Terima kasih 🙏
-${process.env.COMPANY_NAME || "VnsNetwork"}
-📞 ${process.env.COMPANY_PHONE || "081234567890"}`;
+${companyName}${companyPhone ? `\n📞 ${companyPhone}` : ""}`;
+  }
+
+  /**
+   * Create regular reminder message WITHOUT payment link
+   */
+  createRegularReminderMessage(customer, invoice, whatsappSettings = {}) {
+    const companyName =
+      whatsappSettings.companyName ||
+      process.env.COMPANY_NAME ||
+      "Billing WiFi";
+    const companyPhone =
+      whatsappSettings.companyPhone || process.env.COMPANY_PHONE || "";
+
+    const formattedAmount = new Intl.NumberFormat("id-ID", {
+      style: "currency",
+      currency: "IDR",
+      minimumFractionDigits: 0,
+    }).format(invoice.amount || 0);
+
+    return `Halo ${customer.name},
+
+Masa aktif paket internet Anda akan berakhir dalam beberapa hari.
+
+📋 Detail Invoice:
+• Invoice: ${invoice.invoice_number}
+• Paket: ${customer.package_name || "Internet"}
+• Harga: ${formattedAmount}
+• Due Date: ${new Date(invoice.due_date).toLocaleDateString("id-ID")}
+
+💳 PEMBAYARAN:
+Silakan lakukan pembayaran melalui transfer bank atau datang langsung ke kantor kami.
+
+Jika sudah membayar, silakan konfirmasi ke admin.
+
+Terima kasih,
+${companyName}${companyPhone ? `\n📞 ${companyPhone}` : ""}`;
   }
 
   /**
