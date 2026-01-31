@@ -109,7 +109,7 @@ app.use("/api/payments", paymentRoutes);
 app.use("/api/customer-reminder", customerReminderRoutes);
 app.use("/api/notifications", notificationRoutes);
 app.use("/api/monitoring", monitoringRoutes);
-app.use("/api/payment-link", paymentLinkRoutes);
+app.use("/api/payment-links", paymentLinkRoutes);
 app.use("/api/test", testRoutes);
 
 if (process.env.NODE_ENV !== "test") {

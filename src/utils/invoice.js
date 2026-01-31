@@ -252,7 +252,7 @@ class InvoiceUtils {
   static async getInvoiceByPaymentCode(paymentCode) {
     try {
       const [invoices] = await db.query(
-        `SELECT i.*, c.name as customer_name, c.phone, c.email,
+        `SELECT i.*, c.name as customer_name, c.phone,
                 c.address, p.name as package_name, p.duration_days
          FROM invoices i
          LEFT JOIN customers c ON i.customer_id = c.id

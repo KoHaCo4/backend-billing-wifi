@@ -4,31 +4,34 @@ const PaymentLinkController = require("../controllers/paymentLink.controller");
 
 // Public routes (no authentication required for payment links)
 
-// Check if payment link is valid
+// NEW: Get public payment page data (for auto-pay)
+router.get("/public/:payment_code", PaymentLinkController.getPublicPaymentPage);
+
+// NEW: Create direct payment (auto-pay)
+router.post("/direct/:payment_code", PaymentLinkController.createDirectPayment);
+
+// NEW: Generate WhatsApp message with auto-pay link
+router.get(
+  "/autopay-message/:invoice_id",
+  PaymentLinkController.generateAutoPayMessage,
+);
+
+// NEW: Batch generate payment links
+router.post("/batch-generate", PaymentLinkController.batchGenerateLinks);
+
+// Existing routes...
 router.get("/check/:payment_code", PaymentLinkController.checkPaymentLink);
-
-// Get payment page data
 router.get("/page/:payment_code", PaymentLinkController.getPaymentPage);
-
-// Create Snap transaction from payment code
 router.post(
   "/snap/:payment_code",
   PaymentLinkController.createSnapFromPaymentCode,
 );
-
-// Verify payment status
 router.get("/verify/:payment_code", PaymentLinkController.verifyPaymentByCode);
-
-// Extend payment link expiry
 router.post("/extend/:payment_code", PaymentLinkController.extendPaymentLink);
-
-// Generate WhatsApp message
 router.get(
   "/whatsapp/:invoice_id",
   PaymentLinkController.generateWhatsAppMessage,
 );
-
-// Generate payment link for existing invoice
 router.post("/generate/:invoice_id", PaymentLinkController.generatePaymentLink);
 
 module.exports = router;

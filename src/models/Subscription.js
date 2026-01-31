@@ -16,7 +16,6 @@ class Subscription {
           c.id as customer_id,
           c.name as customer_name,
           c.phone,
-          c.email,
           c.address,
           p.id as package_id,
           p.name as package_name,
@@ -56,7 +55,6 @@ class Subscription {
           c.id as customer_id,
           c.name as customer_name,
           c.phone,
-          c.email,
           c.address,
           p.id as package_id,
           p.name as package_name,
@@ -88,7 +86,6 @@ class Subscription {
           s.*,
           c.name as customer_name,
           c.phone,
-          c.email,
           p.name as package_name,
           p.price as package_price
         FROM subscriptions s
@@ -186,7 +183,6 @@ class Subscription {
           s.*,
           c.name as customer_name,
           c.phone,
-          c.email,
           p.name as package_name,
           p.price as package_price
         FROM subscriptions s
@@ -227,7 +223,6 @@ class Subscription {
           s.*,
           c.name as customer_name,
           c.phone,
-          c.email,
           p.name as package_name
         FROM subscriptions s
         JOIN customers c ON s.customer_id = c.id

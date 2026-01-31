@@ -1,6 +1,7 @@
 const InvoiceService = require("../services/invoice.service");
 const MidtransService = require("../services/midtrans.service");
 const PaymentService = require("../services/payment.service");
+const PaymentLinkService = require("../services/paymentLink.service");
 const logger = require("../utils/logger");
 const db = require("../config/database");
 
@@ -83,7 +84,7 @@ class PaymentLinkController {
 
       // Get customer details
       const [customers] = await db.query(
-        "SELECT name, phone, email FROM customers WHERE id = ?",
+        "SELECT name, phone FROM customers WHERE id = ?",
         [invoice.customer_id],
       );
 
@@ -379,6 +380,113 @@ class PaymentLinkController {
       res.status(500).json({
         success: false,
         message: "Error generating payment link",
+        error: error.message,
+      });
+    }
+  }
+
+  /**
+   * Get public payment page data with auto-pay option
+   */
+  static async getPublicPaymentPage(req, res) {
+    try {
+      const { payment_code } = req.params;
+
+      const result =
+        await PaymentLinkService.getPublicPaymentData(payment_code);
+
+      if (!result.success) {
+        return res.status(400).json({
+          success: false,
+          message: result.error,
+          redirect_url: result.redirect,
+        });
+      }
+
+      res.json(result);
+    } catch (error) {
+      logger.error("Get public payment page error:", error);
+      res.status(500).json({
+        success: false,
+        message: "Error loading payment page",
+        error: error.message,
+      });
+    }
+  }
+
+  /**
+   * Create direct Snap payment (auto-pay)
+   */
+  static async createDirectPayment(req, res) {
+    try {
+      const { payment_code } = req.params;
+
+      const result =
+        await PaymentLinkService.createDirectSnapPayment(payment_code);
+
+      res.json({
+        success: true,
+        message: "Payment transaction created successfully",
+        data: result,
+      });
+    } catch (error) {
+      logger.error("Create direct payment error:", error);
+      res.status(500).json({
+        success: false,
+        message: error.message || "Error creating payment transaction",
+        error: error.message,
+      });
+    }
+  }
+
+  /**
+   * Generate WhatsApp message with auto-pay link
+   */
+  static async generateAutoPayMessage(req, res) {
+    try {
+      const { invoice_id } = req.params;
+      const { type = "reminder" } = req.query;
+
+      const result =
+        await PaymentLinkService.generateWhatsAppMessageWithAutoPay(
+          invoice_id,
+          type,
+        );
+
+      res.json(result);
+    } catch (error) {
+      logger.error("Generate auto-pay message error:", error);
+      res.status(500).json({
+        success: false,
+        message: "Error generating WhatsApp message",
+        error: error.message,
+      });
+    }
+  }
+
+  /**
+   * Batch generate payment links with auto-pay
+   */
+  static async batchGenerateLinks(req, res) {
+    try {
+      const { invoice_ids } = req.body;
+
+      if (!invoice_ids || !Array.isArray(invoice_ids)) {
+        return res.status(400).json({
+          success: false,
+          message: "Invoice IDs array is required",
+        });
+      }
+
+      const result =
+        await PaymentLinkService.batchGeneratePaymentLinks(invoice_ids);
+
+      res.json(result);
+    } catch (error) {
+      logger.error("Batch generate links error:", error);
+      res.status(500).json({
+        success: false,
+        message: "Error generating payment links",
         error: error.message,
       });
     }

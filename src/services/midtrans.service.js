@@ -60,6 +60,11 @@ class MidtransService {
       // Generate unique order ID
       const orderId = `INV-${invoiceData.id}-${Date.now()}`;
 
+      // Pastikan FRONTEND_URL benar untuk environment sandbox
+      const frontendUrl = process.env.FRONTEND_URL || "http://localhost:3000";
+
+      console.log("🔧 Using frontend URL for callbacks:", frontendUrl);
+
       // Prepare transaction parameters
       const parameter = {
         transaction_details: {
@@ -88,9 +93,9 @@ class MidtransService {
           "echannel",
         ],
         callbacks: {
-          finish: `${process.env.FRONTEND_URL || "http://localhost:3000"}/payment/finish`,
-          error: `${process.env.FRONTEND_URL || "http://localhost:3000"}/payment/error`,
-          pending: `${process.env.FRONTEND_URL || "http://localhost:3000"}/payment/pending`,
+          finish: `${frontendUrl}/payment/success`,
+          error: `${frontendUrl}/payment/error`,
+          pending: `${frontendUrl}/payment/pending`,
         },
         expiry: {
           unit: "minutes",

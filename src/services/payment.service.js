@@ -155,13 +155,9 @@ class PaymentService {
           i.reference_number as invoice_reference,
           i.payment_notes,
           c.id as customer_id,
-          c.code as customer_code,
           c.name as customer_name,
           c.phone as customer_phone,
-          c.email as customer_email,
-          c.address as customer_address,
-          c.pic_name,
-          c.pic_phone
+          c.address as customer_address
          FROM payments p
          LEFT JOIN invoices i ON p.invoice_id = i.id
          LEFT JOIN customers c ON p.customer_id = c.id
@@ -174,7 +170,6 @@ class PaymentService {
       }
 
       const payment = payments[0];
-
       return {
         id: payment.id,
         payment_id: payment.id,
@@ -184,7 +179,6 @@ class PaymentService {
         customer_name:
           payment.customer_name || `Customer ${payment.customer_id}`,
         customer_phone: payment.customer_phone,
-        customer_email: payment.customer_email,
         amount: parseFloat(payment.amount) || 0,
         status: payment.status,
         payment_method: payment.payment_method,

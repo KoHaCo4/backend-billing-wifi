@@ -205,6 +205,52 @@ class CustomerReminderJob {
 
   // ===== MAIN JOB EXECUTION =====
 
+  // async run() {
+  //   this.isRunning = true;
+  //   const jobStartTime = Date.now();
+
+  //   try {
+  //     logger.info("🔧 ===== SYSTEM PREPARATION =====");
+
+  //     // 1. Check Fonnte connectivity
+  //     const fonnteStatus = await fonnteService.checkDeviceStatus();
+  //     if (!fonnteStatus.success) {
+  //       logger.error("❌ Fonnte service unavailable, aborting job");
+  //       this.isRunning = false;
+  //       return;
+  //     }
+  //     logger.info(
+  //       `✅ Fonnte status: ${fonnteStatus.connected ? "CONNECTED" : "DISCONNECTED"}`,
+  //     );
+
+  //     // 2. Reset reminder flags for expired invoices
+  //     const resetCount = await this.resetExpiredReminders();
+  //     logger.info(`🔄 Reset ${resetCount} expired reminder flags`);
+
+  //     // 3. Send reminders for each configured day
+  //     for (const days of this.daysBefore) {
+  //       await this.processDayReminders(days);
+  //     }
+
+  //     // 4. Process expired payments
+  //     await this.processExpiredPayments();
+
+  //     const duration = Date.now() - jobStartTime;
+  //     logger.info(`✅ ===== JOB COMPLETED IN ${duration}ms =====`);
+  //   } catch (error) {
+  //     logger.error("❌ Critical job error:", error.stack);
+
+  //     // Log error to database
+  //     await db.query(
+  //       `INSERT INTO system_errors
+  //        (module, error_type, error_message, stack_trace, created_at)
+  //        VALUES ('customer_reminder', 'job_error', ?, ?, NOW())`,
+  //       [error.message, error.stack],
+  //     );
+  //   } finally {
+  //     this.isRunning = false;
+  //   }
+  // }
   async run() {
     this.isRunning = true;
     const jobStartTime = Date.now();
@@ -212,47 +258,316 @@ class CustomerReminderJob {
     try {
       logger.info("🔧 ===== SYSTEM PREPARATION =====");
 
-      // 1. Check Fonnte connectivity
-      const fonnteStatus = await fonnteService.checkDeviceStatus();
-      if (!fonnteStatus.success) {
-        logger.error("❌ Fonnte service unavailable, aborting job");
-        this.isRunning = false;
+      // ✅ FIX: Validasi jika fonnteService tidak memiliki checkDeviceStatus
+      if (
+        !fonnteService ||
+        typeof fonnteService.checkDeviceStatus !== "function"
+      ) {
+        logger.error(
+          "❌ fonnteService tidak memiliki checkDeviceStatus method",
+        );
+        logger.info("⚠️ Melanjutkan tanpa pengecekan device status...");
+
+        // Lanjutkan job tanpa pengecekan status
+        await this.processJobWithoutFonnteCheck();
         return;
       }
-      logger.info(
-        `✅ Fonnte status: ${fonnteStatus.connected ? "CONNECTED" : "DISCONNECTED"}`,
-      );
 
-      // 2. Reset reminder flags for expired invoices
-      const resetCount = await this.resetExpiredReminders();
-      logger.info(`🔄 Reset ${resetCount} expired reminder flags`);
+      // 1. Check Fonnte connectivity
+      let fonnteStatus;
+      try {
+        fonnteStatus = await fonnteService.checkDeviceStatus();
 
-      // 3. Send reminders for each configured day
+        if (!fonnteStatus || fonnteStatus.error) {
+          logger.error("❌ Fonnte service error:", fonnteStatus?.error);
+          // Lanjutkan job tanpa fonnte (fallback mode)
+          await this.runInFallbackMode();
+          return;
+        }
+
+        logger.info(
+          `✅ Fonnte status: ${fonnteStatus.connected ? "CONNECTED" : "DISCONNECTED"}`,
+        );
+      } catch (fonnteError) {
+        logger.error("❌ Error checking Fonnte status:", fonnteError.message);
+        // Lanjutkan job tanpa fonnte (fallback mode)
+        await this.runInFallbackMode();
+        return;
+      }
+
+      // 2. Tahap 1: Kirim invoice baru untuk yang butuh
+      await this.sendNewInvoices();
+
+      // 3. Tahap 2: Kirim reminder H-3 dan H-1
       for (const days of this.daysBefore) {
         await this.processDayReminders(days);
       }
 
-      // 4. Process expired payments
+      // 4. Tahap 3: Kirim reminder overdue
+      await this.sendOverdueReminders();
+
+      // 5. Process expired payments
       await this.processExpiredPayments();
 
       const duration = Date.now() - jobStartTime;
       logger.info(`✅ ===== JOB COMPLETED IN ${duration}ms =====`);
     } catch (error) {
-      logger.error("❌ Critical job error:", error.stack);
+      logger.error("❌ Critical job error:", error);
+      logger.error("Stack trace:", error.stack);
 
-      // Log error to database
-      await db.query(
-        `INSERT INTO system_errors 
-         (module, error_type, error_message, stack_trace, created_at)
+      // Log error ke database untuk debugging
+      try {
+        await db.query(
+          `INSERT INTO system_errors 
+         (module, error_type, error_message, stack_trace, created_at) 
          VALUES ('customer_reminder', 'job_error', ?, ?, NOW())`,
-        [error.message, error.stack],
-      );
+          [error.message, error.stack?.substring(0, 2000)],
+        );
+      } catch (dbError) {
+        logger.error("Failed to log error to database:", dbError);
+      }
     } finally {
       this.isRunning = false;
     }
   }
 
+  // ✅ FIX: Tambahkan method untuk fallback mode
+  async runInFallbackMode() {
+    logger.info("⚠️ Running job in FALLBACK MODE (without Fonnte)");
+
+    try {
+      // Lakukan proses yang tidak membutuhkan Fonnte
+      await this.resetExpiredReminders();
+      await this.resetReminderFlags();
+      await this.autoDisableExpiredCustomers();
+
+      logger.info("✅ Fallback mode completed");
+    } catch (error) {
+      logger.error("❌ Error in fallback mode:", error);
+    }
+  }
+
+  // ✅ FIX: Tambahkan method tanpa fonnte check
+  async processJobWithoutFonnteCheck() {
+    logger.info("🔄 Processing job without Fonnte connectivity check");
+
+    try {
+      // Reset flags
+      await this.resetExpiredReminders();
+      await this.resetReminderFlags();
+
+      // Proses expired customers
+      await this.autoDisableExpiredCustomers();
+
+      // Process expired payments (tanpa notifikasi)
+      await this.processExpiredPaymentsWithoutNotification();
+
+      logger.info("✅ Job processed without Fonnte");
+    } catch (error) {
+      logger.error("❌ Error in process without Fonnte:", error);
+    }
+  }
+
+  async processExpiredPaymentsWithoutNotification() {
+    try {
+      logger.info("🕒 Checking for expired payments (without notification)...");
+
+      // Ambil invoice yang expired
+      const [expiredInvoices] = await db.query(
+        `SELECT * FROM invoices 
+       WHERE status = 'pending' 
+       AND expires_at < NOW() 
+       AND expires_at IS NOT NULL`,
+      );
+
+      // Update status tanpa kirim notifikasi
+      for (const invoice of expiredInvoices) {
+        await db.query(`UPDATE invoices SET status = 'expired' WHERE id = ?`, [
+          invoice.id,
+        ]);
+      }
+
+      logger.info(`✅ Updated ${expiredInvoices.length} expired invoices`);
+    } catch (error) {
+      logger.error("Error processing expired payments:", error);
+    }
+  }
+
+  async saveNotificationLog(logData) {
+    try {
+      // Pastikan message ada sebelum substring
+      const message = logData.message
+        ? String(logData.message).substring(0, 500)
+        : "";
+
+      await db.execute(
+        `INSERT INTO notification_logs 
+       (customer_id, invoice_id, phone, message_type, message, status, message_id, error_message, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, NOW())`,
+        [
+          logData.customer_id || null,
+          logData.invoice_id || null,
+          logData.phone,
+          logData.message_type,
+          message,
+          logData.status,
+          logData.message_id || null,
+          logData.error_message || null,
+        ],
+      );
+      return true;
+    } catch (error) {
+      console.error("❌ Error saving notification log:", error);
+      return false;
+    }
+  }
+
   // ===== CORE PROCESSING =====
+
+  /**
+   * Tahap 1: Kirim invoice baru
+   */
+  async sendNewInvoices() {
+    try {
+      console.log("📨 ===== TAHAP 1: KIRIM INVOICE BARU =====");
+
+      // Cari customer yang butuh invoice baru (7 hari sebelum expired)
+      const [customers] = await db.query(`
+        SELECT c.*, p.name as package_name, p.price as package_price
+        FROM customers c
+        LEFT JOIN packages p ON c.package_id = p.id
+        WHERE c.status = 'active'
+        AND c.expired_at IS NOT NULL
+        AND DATEDIFF(c.expired_at, CURDATE()) = 7
+        AND NOT EXISTS (
+          SELECT 1 FROM invoices i 
+          WHERE i.customer_id = c.id 
+          AND i.status = 'pending'
+          AND i.created_at >= DATE_SUB(CURDATE(), INTERVAL 30 DAY)
+        )
+        LIMIT 10
+      `);
+
+      console.log(
+        `📊 Found ${customers.length} customers needing new invoices`,
+      );
+
+      for (const customer of customers) {
+        try {
+          await this.createInvoiceForCustomer(customer);
+        } catch (error) {
+          console.error(`❌ Error for ${customer.name}:`, error.message);
+        }
+      }
+    } catch (error) {
+      console.error("❌ Error in sendNewInvoices:", error);
+    }
+  }
+
+  /**
+   * Tahap 3: Kirim reminder overdue
+   */
+  async sendOverdueReminders() {
+    try {
+      console.log("⏰ ===== TAHAP 3: KIRIM REMINDER OVERDUE =====");
+
+      // PERBAIKAN: Query tanpa menggunakan invoice_id di subquery
+      const [invoices] = await db.query(`
+      SELECT 
+        i.id,
+        i.invoice_number,
+        i.amount,
+        i.due_date,
+        i.status,
+        i.payment_link,
+        i.expires_at,
+        i.customer_id,
+        c.name as customer_name,
+        c.phone,
+        c.username_pppoe,
+        c.package_id,
+        p.name as package_name,
+        p.price as package_price
+      FROM invoices i
+      JOIN customers c ON i.customer_id = c.id
+      LEFT JOIN packages p ON c.package_id = p.id
+      WHERE i.status = 'pending'
+      AND i.due_date < CURDATE()
+      AND c.phone IS NOT NULL
+      AND c.phone != ''
+      AND NOT EXISTS (
+        SELECT 1 FROM notification_logs nl
+        WHERE nl.customer_id = i.customer_id
+        AND nl.message_type = 'overdue_reminder'
+        AND DATE(nl.created_at) = CURDATE()
+      )
+      LIMIT 10
+    `);
+
+      console.log(`📊 Found ${invoices.length} overdue invoices`);
+
+      for (const invoice of invoices) {
+        try {
+          const customerData = {
+            id: invoice.customer_id,
+            name: invoice.customer_name,
+            phone: invoice.phone,
+            email: invoice.email || "",
+            username_pppoe: invoice.username_pppoe || "",
+            package_id: invoice.package_id,
+            package_name: invoice.package_name,
+            package_price: invoice.package_price,
+          };
+
+          const packageInfo = {
+            name: invoice.package_name,
+            price: invoice.package_price,
+          };
+
+          console.log(
+            `📤 Sending overdue reminder for ${invoice.invoice_number}`,
+          );
+
+          // Kirim reminder
+          const sendResult = await fonnteService.sendPaymentReminder(
+            customerData,
+            invoice,
+            packageInfo,
+          );
+
+          // Log pengiriman - TANPA invoice_id
+          await this.saveNotificationLog({
+            customer_id: invoice.customer_id,
+            phone: customerData.phone,
+            message_type: "overdue_reminder",
+            message: `Overdue reminder for invoice ${invoice.invoice_number} (${invoice.amount})`,
+            status: sendResult.success ? "sent" : "failed",
+            message_id: sendResult.messageId,
+            error_message: sendResult.error,
+          });
+
+          console.log(`✅ Overdue reminder sent for ${invoice.invoice_number}`);
+        } catch (error) {
+          console.error(
+            `❌ Error for invoice ${invoice.invoice_number}:`,
+            error.message,
+          );
+
+          // Log error - TANPA invoice_id
+          await this.saveNotificationLog({
+            customer_id: invoice.customer_id,
+            phone: invoice.phone,
+            message_type: "overdue_reminder",
+            message: `Failed to send overdue reminder: ${error.message}`,
+            status: "failed",
+            error_message: error.message,
+          });
+        }
+      }
+    } catch (error) {
+      console.error("❌ Error in sendOverdueReminders:", error);
+    }
+  }
 
   async processDayReminders(daysBefore) {
     try {
@@ -322,10 +637,8 @@ class CustomerReminderJob {
       console.log(`[${requestId}] Processing ${customer.name}...`);
 
       // 1. Validate customer data
-      const validation = this.validateCustomer(customer);
-      if (!validation.valid) {
-        console.warn(`[${requestId}] Skipped: ${validation.reason}`);
-        return { status: "skipped", reason: validation.reason };
+      if (!customer.phone || customer.phone.trim() === "") {
+        return { status: "skipped", reason: "no_phone" };
       }
 
       // 2. Normalize phone number
@@ -354,91 +667,40 @@ class CustomerReminderJob {
 
       const invoice = invoiceResult.invoice;
       console.log(
-        `[${requestId}] Final invoice payment link: ${invoice.payment_link || "NO LINK"}`,
+        `[${requestId}] Invoice payment link: ${invoice.payment_link || "NO LINK"}`,
       );
 
-      // 4. DEBUG: Log semua data yang akan dikirim
-      console.log(`[${requestId}] === DEBUG DATA ===`);
-      console.log(`[${requestId}] Customer name: ${customer.name}`);
-      console.log(`[${requestId}] Customer admin_id: ${customer.admin_id}`);
-      console.log(`[${requestId}] Invoice number: ${invoice.invoice_number}`);
-      console.log(
-        `[${requestId}] Invoice payment_link: ${invoice.payment_link}`,
-      );
-      console.log(`[${requestId}] Invoice amount: ${invoice.amount}`);
-
-      // 5. Create WhatsApp message - USE FONNTE SERVICE
-      console.log(
-        `[${requestId}] Calling fonnteService.createPaymentReminderMessage...`,
+      // 4. Get package info
+      const [packageRows] = await db.query(
+        "SELECT * FROM packages WHERE id = ?",
+        [customer.package_id],
       );
 
-      const customerData = {
-        customer: {
-          id: customer.id,
-          name: customer.name,
-          phone: phoneNumber,
-          admin_id: customer.admin_id || 3,
-          package_name: customer.package_name,
-          days_left: daysBefore,
-        },
-        invoice: {
-          id: invoice.id,
-          invoice_number: invoice.invoice_number,
-          amount: invoice.amount,
-          payment_link: invoice.payment_link,
-          expires_at: invoice.expires_at,
-          due_date: invoice.due_date,
-        },
-        admin_id: customer.admin_id || 3,
-        phone: phoneNumber,
+      const packageInfo = packageRows[0] || {
+        name: customer.package_name || "Paket Internet",
+        price: customer.package_price || "0",
       };
 
-      const message = await fonnteService.createPaymentReminderMessage(
+      // 5. Prepare customer data
+      const customerData = {
+        id: customer.id,
+        name: customer.name,
+        phone: phoneNumber,
+        email: customer.email || "",
+        username_pppoe: customer.username_pppoe || "",
+        admin_id: customer.admin_id || 3,
+      };
+
+      // 6. Kirim pesan reminder (INI SATU-SATUNYA PENGIRIMAN)
+      console.log(`[${requestId}] Sending payment reminder...`);
+
+      const sendResult = await fonnteService.sendPaymentReminder(
         customerData,
         invoice,
+        packageInfo,
       );
 
-      console.log(`[${requestId}] Message length: ${message.length}`);
-      console.log(
-        `[${requestId}] First 200 chars: ${message.substring(0, 200)}...`,
-      );
-
-      // 6. Check if message contains payment link
-      const hasPaymentLink =
-        message.includes("payment_link") ||
-        message.includes("http://") ||
-        message.includes("https://") ||
-        message.includes(invoice.payment_link || "");
-
-      console.log(
-        `[${requestId}] Message contains payment link: ${hasPaymentLink}`,
-      );
-      if (hasPaymentLink && invoice.payment_link) {
-        console.log(
-          `[${requestId}] ✅ CONFIRMED: Message contains payment link!`,
-        );
-        console.log(
-          `[${requestId}] Payment link in message: ${invoice.payment_link}`,
-        );
-      } else {
-        console.log(
-          `[${requestId}] ⚠️ WARNING: Message does NOT contain payment link!`,
-        );
-      }
-
-      // 7. Send WhatsApp message
-      console.log(`[${requestId}] Sending WhatsApp...`);
-      const sendResult = await fonnteService.sendMessage(phoneNumber, message, {
-        delay: "2-5",
-        customData: {
-          requestId,
-          customerId: customer.id,
-          invoiceId: invoice.id,
-          type: `reminder_${daysBefore}day`,
-        },
-      });
-
-      // 8. Update customer reminder status
+      // 7. Update customer reminder status jika berhasil
       if (sendResult.success) {
         console.log(
           `[${requestId}] ✅ WhatsApp sent successfully to ${customer.name}`,
@@ -450,14 +712,36 @@ class CustomerReminderJob {
           [customer.id],
         );
 
+        // Log pengiriman
+        await this.saveNotificationLog({
+          customer_id: customer.id,
+          invoice_id: invoice.id,
+          phone: phoneNumber,
+          message_type: `reminder_${daysBefore}day`,
+          message: "Payment reminder sent",
+          status: "sent",
+          message_id: sendResult.messageId,
+        });
+
         return {
           status: "success",
           invoiceId: invoice.id,
           messageId: sendResult.messageId,
-          hasPaymentLink: hasPaymentLink,
         };
       } else {
         console.error(`[${requestId}] ❌ WhatsApp failed: ${sendResult.error}`);
+
+        // Log error
+        await this.saveNotificationLog({
+          customer_id: customer.id,
+          invoice_id: invoice.id,
+          phone: phoneNumber,
+          message_type: `reminder_${daysBefore}day`,
+          message: "Payment reminder failed",
+          status: "failed",
+          error_message: sendResult.error,
+        });
+
         return {
           status: "failed",
           reason: "send_failed",
@@ -595,15 +879,22 @@ Terima kasih`;
 
   async saveNotificationLog(logData) {
     try {
+      // Pastikan message ada sebelum substring
+      const message = logData.message
+        ? String(logData.message).substring(0, 500)
+        : "";
+
+      // Sesuaikan dengan struktur tabel yang ada
+      // Tabel memiliki: customer_id, subscription_id, phone, message_type, message, status, message_id, response_data, error_message
       await db.execute(
         `INSERT INTO notification_logs 
        (customer_id, phone, message_type, message, status, message_id, error_message, created_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, NOW())`,
         [
-          logData.customer_id,
+          logData.customer_id || null,
           logData.phone,
           logData.message_type,
-          logData.message.substring(0, 500), // Limit length
+          message,
           logData.status,
           logData.message_id || null,
           logData.error_message || null,
@@ -612,7 +903,26 @@ Terima kasih`;
       return true;
     } catch (error) {
       console.error("❌ Error saving notification log:", error);
-      return false;
+
+      // Fallback: coba dengan lebih sedikit kolom
+      try {
+        await db.execute(
+          `INSERT INTO notification_logs 
+         (customer_id, phone, message_type, status, created_at)
+         VALUES (?, ?, ?, ?, NOW())`,
+          [
+            logData.customer_id || null,
+            logData.phone,
+            logData.message_type,
+            logData.status || "failed",
+          ],
+        );
+        console.warn("⚠️ Saved log with minimal data");
+        return true;
+      } catch (fallbackError) {
+        console.error("❌ Even fallback save failed:", fallbackError);
+        return false;
+      }
     }
   }
 
@@ -623,12 +933,12 @@ Terima kasih`;
       // Check for existing pending invoice
       const [existingInvoices] = await db.query(
         `SELECT i.* 
-       FROM invoices i
-       WHERE i.customer_id = ?
-       AND i.status IN ('pending', 'overdue')
-       AND i.created_at >= DATE_SUB(NOW(), INTERVAL 30 DAY)
-       ORDER BY i.created_at DESC
-       LIMIT 1`,
+      FROM invoices i
+      WHERE i.customer_id = ?
+      AND i.status IN ('pending', 'overdue')
+      AND i.created_at >= DATE_SUB(NOW(), INTERVAL 30 DAY)
+      ORDER BY i.created_at DESC
+      LIMIT 1`,
         [customer.id],
       );
 
@@ -640,69 +950,38 @@ Terima kasih`;
           `[${requestId}] Menggunakan invoice yang sudah ada: ${invoice.invoice_number}`,
         );
 
-        // CEK SETTINGS DULU - HARUS GENERATE PAYMENT LINK JIKA DIAKTIFKAN
-        try {
-          // Get WhatsApp settings dari database
-          const [settings] = await db.query(
-            `SELECT settings_json FROM settings WHERE admin_id = ? ORDER BY updated_at DESC LIMIT 1`,
-            [customer.admin_id || this.adminId || 3],
-          );
-
-          let enablePaymentLinks = false;
-          if (settings.length > 0) {
-            const settingsData =
-              typeof settings[0].settings_json === "string"
-                ? JSON.parse(settings[0].settings_json)
-                : settings[0].settings_json;
-            enablePaymentLinks =
-              settingsData.whatsapp?.enablePaymentLinks === true;
-          }
-
+        // Generate payment link jika belum ada
+        if (
+          !invoice.payment_link ||
+          invoice.payment_link === "" ||
+          invoice.payment_link === null
+        ) {
           console.log(
-            `[${requestId}] Settings check - enablePaymentLinks: ${enablePaymentLinks}`,
-          );
-          console.log(
-            `[${requestId}] Invoice has payment link: ${!!invoice.payment_link}`,
+            `[${requestId}] ⚠️ Invoice has NO payment link! Generating...`,
           );
 
-          // Jika payment link diaktifkan TAPI invoice tidak punya payment link
-          if (
-            enablePaymentLinks &&
-            (!invoice.payment_link ||
-              invoice.payment_link === "" ||
-              invoice.payment_link === null)
-          ) {
+          try {
+            const InvoiceService = require("../services/invoice.service");
+            const paymentLinkResult =
+              await InvoiceService.generatePaymentLinkForInvoice(invoice.id);
+            invoice.payment_link = paymentLinkResult.payment_link;
+            invoice.expires_at = paymentLinkResult.expires_at;
+
             console.log(
-              `[${requestId}] ⚠️ WARNING: Payment links enabled but invoice has NO payment link! Generating...`,
+              `[${requestId}] ✅ Generated payment link: ${invoice.payment_link}`,
             );
 
-            try {
-              const paymentLinkResult =
-                await InvoiceService.generatePaymentLinkForInvoice(invoice.id);
-              invoice.payment_link = paymentLinkResult.payment_link;
-              invoice.expires_at = paymentLinkResult.expires_at;
-
-              console.log(
-                `[${requestId}] ✅ Generated payment link: ${invoice.payment_link}`,
-              );
-
-              // Update invoice di database
-              await db.query(
-                `UPDATE invoices SET payment_link = ?, expires_at = ? WHERE id = ?`,
-                [invoice.payment_link, invoice.expires_at, invoice.id],
-              );
-            } catch (generateError) {
-              console.error(
-                `[${requestId}] ❌ Failed to generate payment link:`,
-                generateError,
-              );
-            }
+            // Update database
+            await db.query(
+              `UPDATE invoices SET payment_link = ?, expires_at = ? WHERE id = ?`,
+              [invoice.payment_link, invoice.expires_at, invoice.id],
+            );
+          } catch (generateError) {
+            console.error(
+              `[${requestId}] ❌ Failed to generate payment link:`,
+              generateError,
+            );
           }
-        } catch (settingsError) {
-          console.error(
-            `[${requestId}] Error checking settings:`,
-            settingsError,
-          );
         }
       } else {
         console.log(
@@ -716,13 +995,48 @@ Terima kasih`;
           package_id: customer.package_id,
         };
 
-        // ⚠️ PERBAIKAN: Gunakan createManualInvoice yang sudah include payment link
+        // Buat invoice baru dengan payment link
+        const InvoiceService = require("../services/invoice.service");
         invoice = await InvoiceService.createManualInvoice(invoiceData);
 
         console.log(`[${requestId}] Invoice dibuat: ${invoice.invoice_number}`);
         console.log(
           `[${requestId}] Payment link: ${invoice.payment_link || "NO LINK"}`,
         );
+
+        // KIRIM PESAN INVOICE BARU (Pesan ke-1)
+        try {
+          const fonnteService = require("../services/fonnte.service");
+
+          const customerData = {
+            id: customer.id,
+            name: customer.name,
+            phone: customer.phone,
+            email: customer.email || "",
+            username_pppoe: customer.username_pppoe || "",
+            admin_id: customer.admin_id || 3,
+          };
+
+          const packageInfo = {
+            name: customer.package_name || "Paket Internet",
+            price: customer.package_price || "0",
+          };
+
+          console.log(`[${requestId}] Sending new invoice notification...`);
+
+          await fonnteService.sendInvoiceCreated(
+            customerData,
+            invoice,
+            packageInfo,
+          );
+
+          console.log(`[${requestId}] ✅ New invoice notification sent`);
+        } catch (invoiceError) {
+          console.error(
+            `[${requestId}] ❌ Failed to send new invoice notification:`,
+            invoiceError.message,
+          );
+        }
       }
 
       return { success: true, invoice };

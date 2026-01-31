@@ -1,283 +1,6 @@
-// const axios = require("axios");
-// const logger = require("../utils/logger");
-
-// class FonnteService {
-//   constructor() {
-//     this.apiUrl = process.env.FONNTE_API_URL || "https://api.fonnte.com";
-//     this.apiToken = process.env.FONNTE_API_TOKEN;
-//   }
-
-//   async sendMessage(to, message, options = {}) {
-//     try {
-//       if (!this.apiToken) {
-//         logger.error("FONNTE_API_TOKEN tidak ditemukan");
-//         return {
-//           success: false,
-//           error: "API token tidak dikonfigurasi",
-//         };
-//       }
-
-//       // Format nomor telepon - HILANGKAN SEMUA FORMATTING
-//       let phoneNumber = to.toString().trim();
-
-//       // Hilangkan semua karakter non-digit
-//       phoneNumber = phoneNumber.replace(/\D/g, "");
-
-//       // Jika dimulai dengan 0, hapus
-//       if (phoneNumber.startsWith("0")) {
-//         phoneNumber = phoneNumber.substring(1);
-//       }
-
-//       // Jika dimulai dengan 62, hapus
-//       if (phoneNumber.startsWith("62")) {
-//         phoneNumber = phoneNumber.substring(2);
-//       }
-
-//       // Jika dimulai dengan +62, hapus
-//       if (phoneNumber.startsWith("+62")) {
-//         phoneNumber = phoneNumber.substring(3);
-//       }
-
-//       logger.info(`Mengirim ke: ${phoneNumber}`);
-
-//       // Format payload sesuai dokumentasi Fonnte
-//       const payload = {
-//         target: phoneNumber, // Hanya angka, tanpa kode negara
-//         message: message,
-//         delay: "1-5", // Format delay yang benar
-//         countryCode: "62", // Selalu tambahkan countryCode
-//       };
-
-//       // Tambahkan options lainnya jika ada
-//       if (options.url) payload.url = options.url;
-//       if (options.filename) payload.filename = options.filename;
-//       if (options.schedule) payload.schedule = options.schedule;
-
-//       logger.info("Payload:", JSON.stringify(payload));
-
-//       const response = await axios({
-//         method: "post",
-//         url: `${this.apiUrl}/send`,
-//         data: payload,
-//         headers: {
-//           Authorization: this.apiToken,
-//           "Content-Type": "application/json",
-//         },
-//         timeout: 30000,
-//       });
-
-//       logger.info("Response Fonnte:", JSON.stringify(response.data));
-
-//       // Cek berbagai format response yang mungkin
-//       if (
-//         response.data.status === true ||
-//         response.data.status === "sent" ||
-//         response.data.message_id
-//       ) {
-//         return {
-//           success: true,
-//           data: response.data,
-//           messageId: response.data.message_id,
-//         };
-//       } else {
-//         return {
-//           success: false,
-//           error: response.data.reason || "Unknown error",
-//           data: response.data,
-//         };
-//       }
-//     } catch (error) {
-//       logger.error("Fonnte API Error:", {
-//         message: error.message,
-//         response: error.response?.data,
-//         status: error.response?.status,
-//         config: {
-//           url: error.config?.url,
-//           method: error.config?.method,
-//           data: error.config?.data,
-//         },
-//       });
-
-//       return {
-//         success: false,
-//         error: error.message,
-//         response: error.response?.data,
-//         statusCode: error.response?.status,
-//       };
-//     }
-//   }
-
-//   async sendSubscriptionReminder(customer) {
-//     const message = `Halo ${customer.name},
-
-// Masa aktif paket internet Anda akan berakhir dalam 1 hari (${customer.expiry_date}).
-
-// Segera lakukan pembayaran untuk menghindari pemutusan layanan.
-
-// Detail Paket:
-// - Paket: ${customer.package_name}
-// - Harga: ${customer.package_price}
-// - Expired: ${customer.expiry_date}
-
-// Terima kasih,
-// ${process.env.COMPANY_NAME || "Billing WiFi"}`;
-
-//     return await this.sendMessage(customer.phone, message, {
-//       delay: "2-10", // Random delay 2-10 detik
-//     });
-//   }
-
-//   async checkDeviceStatus() {
-//     try {
-//       if (!this.apiToken) {
-//         return {
-//           success: false,
-//           error: "API token tidak ditemukan",
-//         };
-//       }
-
-//       logger.info("🔍 Checking Fonnte device status...");
-
-//       // Coba beberapa endpoint yang mungkin
-//       const endpoints = [
-//         { method: "get", url: `${this.apiUrl}/device` },
-//         { method: "post", url: `${this.apiUrl}/device` },
-//         { method: "get", url: `${this.apiUrl}/device-info` },
-//         { method: "post", url: `${this.apiUrl}/device-info` },
-//         { method: "get", url: `${this.apiUrl}/status` },
-//       ];
-
-//       let lastError = null;
-
-//       for (const endpoint of endpoints) {
-//         try {
-//           logger.debug(
-//             `Trying ${endpoint.method.toUpperCase()} ${endpoint.url}`,
-//           );
-
-//           const response = await axios({
-//             method: endpoint.method,
-//             url: endpoint.url,
-//             headers: {
-//               Authorization: this.apiToken,
-//               "User-Agent": "BillingWifi-System/1.0",
-//             },
-//             timeout: 10000,
-//           });
-
-//           logger.info("✅ Device status response:", response.data);
-
-//           // Cek response format yang umum
-//           const data = response.data;
-
-//           // Format 1: { device: {...}, status: 'connected' }
-//           if (data.device_status === "connect" || data.status === true) {
-//             return {
-//               success: true,
-//               data: data,
-//               device: data.device,
-//               status: data.device_status || data.status,
-//               connected: true, // Set ke true karena device_status = 'connect'
-//               quota: data.quota,
-//               expired: data.expired,
-//               package: data.package,
-//             };
-//           }
-
-//           // Format 2: { success: true, data: {...} }
-//           if (data.success !== false) {
-//             return {
-//               success: true,
-//               data: data,
-//             };
-//           }
-//         } catch (err) {
-//           lastError = err;
-//           logger.debug(`Endpoint ${endpoint.url} failed: ${err.message}`);
-//           // Continue ke endpoint berikutnya
-//         }
-//       }
-
-//       // Jika semua endpoint gagal
-//       if (lastError) {
-//         throw lastError;
-//       }
-
-//       return {
-//         success: false,
-//         error: "No valid endpoint found",
-//         suggestion:
-//           "Check Fonnte API documentation for correct device status endpoint",
-//       };
-//     } catch (error) {
-//       logger.error("❌ Device Status Error:", {
-//         message: error.message,
-//         status: error.response?.status,
-//         data: error.response?.data,
-//       });
-
-//       // Berdasarkan error 405, mungkin endpoint berbeda
-//       // Coba alternative approach: test dengan send message kecil
-//       try {
-//         logger.info("🔄 Trying alternative device check via test message...");
-
-//         // Kirim test message ke nomor dummy
-//         const testResult = await this.sendMessage("000000000000", "test");
-
-//         return {
-//           success: testResult.success,
-//           alternativeCheck: true,
-//           message: testResult.success
-//             ? "API is working (test message accepted)"
-//             : "API may have issues",
-//           sendStatus: testResult.status,
-//           error: testResult.error,
-//         };
-//       } catch (sendError) {
-//         return {
-//           success: false,
-//           error: `Device check failed: ${error.message}`,
-//           alternativeCheckError: sendError.message,
-//           statusCode: error.response?.status,
-//         };
-//       }
-//     }
-//   }
-
-//   // Test endpoint langsung
-//   async testDirect() {
-//     try {
-//       // Cek dulu apakah token valid
-//       const deviceCheck = await this.checkDeviceStatus();
-
-//       if (!deviceCheck.success) {
-//         return deviceCheck;
-//       }
-
-//       // Test send dengan nomor khusus (gunakan nomor admin)
-//       const testNumber = process.env.TEST_PHONE_NUMBER || "81325974890";
-//       const testMessage =
-//         "Test dari Billing WiFi - " + new Date().toLocaleString("id-ID");
-
-//       logger.info(`Testing direct send to: ${testNumber}`);
-
-//       return await this.sendMessage(testNumber, testMessage);
-//     } catch (error) {
-//       logger.error("Direct test error:", error);
-//       return {
-//         success: false,
-//         error: error.message,
-//       };
-//     }
-//   }
-// }
-
-// module.exports = new FonnteService();
-
 const axios = require("axios");
 const logger = require("../utils/logger");
-const customerReminder = require("../jobs/customerReminder");
-const settingsController = require("../controllers/settings.controller");
+const db = require("../config/database");
 
 class FonnteService {
   constructor() {
@@ -289,6 +12,41 @@ class FonnteService {
   }
 
   // ===== CORE FUNCTIONS =====
+
+  // ✅ FIX: Tambahkan method yang hilang
+  async checkDeviceStatus() {
+    try {
+      // Cache status untuk 1 menit
+      if (
+        this.deviceStatus &&
+        this.lastChecked &&
+        Date.now() - this.lastChecked < 60000
+      ) {
+        return this.deviceStatus;
+      }
+
+      const response = await axios.get(`${this.apiUrl}/device-status`, {
+        headers: {
+          Authorization: this.apiToken,
+        },
+        timeout: 5000,
+      });
+
+      this.deviceStatus = response.data;
+      this.lastChecked = Date.now();
+
+      logger.info("Fonnte device status checked", {
+        status: this.deviceStatus,
+      });
+      return this.deviceStatus;
+    } catch (error) {
+      logger.error("Failed to check Fonnte device status", {
+        error: error.message,
+      });
+      this.deviceStatus = { connected: false, error: error.message };
+      return this.deviceStatus;
+    }
+  }
 
   /**
    * Send WhatsApp message with improved error handling and retry logic
@@ -606,80 +364,258 @@ class FonnteService {
   }
 
   /**
-   * Send payment reminder with payment link
+   * 1. PESAN PEMBUATAN INVOICE BARU
    */
-  async sendPaymentReminder(customerData, invoiceData) {
-    logger.info(
-      `[PAYMENT_REMINDER] Starting for customer: ${customerData.name || customerData.customer?.name}`,
+  async sendInvoiceCreated(customer, invoice, packageInfo) {
+    const message = this.createInvoiceCreatedMessage(
+      customer,
+      invoice,
+      packageInfo,
     );
 
-    // Debug customer data
-    logger.info(`[PAYMENT_REMINDER] Customer data:`, {
-      name: customerData.name || customerData.customer?.name,
-      adminId: customerData.admin_id || customerData.customer?.admin_id,
-      phone: customerData.phone || customerData.customer?.phone,
-    });
-
-    const message = await this.createPaymentReminderMessage(
-      customerData,
-      invoiceData,
+    console.log(
+      `[INVOICE_CREATED] Sending to ${customer.name}, Invoice: ${invoice.invoice_number}`,
     );
-
-    // Debug message content
-    const hasPaymentLink =
-      message.includes("payment_link") ||
-      message.includes("http://") ||
-      message.includes("https://");
-    logger.info(
-      `[PAYMENT_REMINDER] Message contains payment link: ${hasPaymentLink}`,
-    );
-
-    if (hasPaymentLink) {
-      logger.info(
-        `[PAYMENT_REMINDER] WARNING: Message STILL contains payment link!`,
-      );
-      logger.info(
-        `[PAYMENT_REMINDER] First 200 chars: ${message.substring(0, 200)}`,
-      );
-    }
-
-    return await this.sendMessage(
-      customerData.phone || customerData.customer?.phone,
-      message,
-      {
-        delay: "3-7",
-        customData: {
-          type: "payment_reminder",
-          invoiceId: invoiceData.id,
-          customerId: customerData.id || customerData.customer?.id,
-        },
+    return await this.sendMessage(customer.phone, message, {
+      delay: "2-5",
+      customData: {
+        type: "invoice_created",
+        invoiceId: invoice.id,
+        customerId: customer.id,
       },
-    );
+    });
   }
 
   /**
-   * Create payment reminder message with payment link
+   * 2. PESAN REMINDER JATUH TEMPO
    */
-  async createPaymentReminderMessage(customerData, invoiceData) {
-    console.log(`🚨 [EMERGENCY FIX] createPaymentReminderMessage called`);
+  async sendPaymentReminder(customer, invoice, packageInfo) {
+    const message = this.createPaymentReminderMessage(
+      customer,
+      invoice,
+      packageInfo,
+    );
 
-    const customer = customerData.customer || customerData;
-    const invoice = invoiceData || customerData.invoice;
+    console.log(
+      `[PAYMENT_REMINDER] Sending to ${customer.name}, Invoice: ${invoice.invoice_number}`,
+    );
+    return await this.sendMessage(customer.phone, message, {
+      delay: "2-5",
+      customData: {
+        type: "payment_reminder",
+        invoiceId: invoice.id,
+        customerId: customer.id,
+        daysBefore: invoice.days_left || 1,
+      },
+    });
+  }
 
-    console.log(`🚨 Customer: ${customer.name}`);
-    console.log(`🚨 Invoice: ${invoice.invoice_number}`);
-    console.log(`🚨 Payment link: ${invoice.payment_link || "NO LINK"}`);
+  /**
+   * 3. PESAN KONFIRMASI PEMBAYARAN
+   */
+  async sendPaymentConfirmation(customer, invoice, paymentInfo, packageInfo) {
+    const message = this.createPaymentConfirmationMessage(
+      customer,
+      invoice,
+      paymentInfo,
+      packageInfo,
+    );
 
-    // HARDCODE: SELALU gunakan payment link jika ada
-    if (invoice.payment_link) {
-      console.log(
-        `🚨 Creating message WITH payment link: ${invoice.payment_link}`,
-      );
-      return this.createPaymentLinkMessage(customer, invoice, {});
-    } else {
-      console.log(`🚨 Creating message WITHOUT payment link`);
-      return this.createRegularReminderMessage(customer, invoice, {});
-    }
+    console.log(
+      `[PAYMENT_CONFIRMATION] Sending to ${customer.name}, Invoice: ${invoice.invoice_number}`,
+    );
+    return await this.sendMessage(customer.phone, message, {
+      delay: "2-5",
+      customData: {
+        type: "payment_confirmation",
+        invoiceId: invoice.id,
+        customerId: customer.id,
+        paymentId: paymentInfo.id,
+      },
+    });
+  }
+
+  /**
+   * Buat pesan invoice baru
+   */
+  createInvoiceCreatedMessage(customer, invoice, packageInfo) {
+    const companyName = process.env.COMPANY_NAME || "VNS NETWORK";
+    const companyAddress =
+      process.env.COMPANY_ADDRESS || "Jl. Masjid Kedung panjang 4/5, 59154";
+    const csWhatsapp = process.env.CS_WHATSAPP || "628895461944";
+    const supportWhatsapp = process.env.SUPPORT_WHATSAPP || "6285724733627";
+
+    const formattedAmount = new Intl.NumberFormat("id-ID", {
+      style: "currency",
+      currency: "IDR",
+      minimumFractionDigits: 0,
+    }).format(invoice.amount || 0);
+
+    const dueDate = new Date(invoice.due_date).toLocaleDateString("id-ID", {
+      day: "2-digit",
+      month: "2-digit",
+      year: "numeric",
+    });
+
+    // Hitung periode
+    const startDate = new Date(invoice.issue_date);
+    const endDate = new Date(startDate);
+    endDate.setMonth(endDate.getMonth() + 1);
+
+    const period = `${startDate.toLocaleDateString("id-ID", {
+      day: "2-digit",
+      month: "2-digit",
+      year: "numeric",
+    })} - ${endDate.toLocaleDateString("id-ID", {
+      day: "2-digit",
+      month: "2-digit",
+      year: "numeric",
+    })}`;
+
+    return `Salam ${customer.name}
+
+Kami informasikan Invoice anda telah terbit dan dapat dibayarkan, berikut rinciannya :
+
+ID Pelanggan: ${customer.id}${new Date().getFullYear()}${String(customer.id).padStart(4, "0")}
+Nomor Invoice: ${invoice.invoice_number}
+Amount: ${formattedAmount}
+PPN: 0
+Discount: 0
+Total: ${formattedAmount}
+Item: ${packageInfo.name || "Internet"} ${customer.username_pppoe || customer.email || ""} - ${packageInfo.name}
+Jatuh tempo: ${dueDate}
+Period: ${period}
+
+Mohon segera lakukan pembayaran sebelum jatuh tempo, Agar Internet anda tidak terisolir
+
+*Metode Pembayaran Otomatis*
+Bank Virtual Account, OVO, DANA, LinkAja, ShopeePay, Alfamart, QRIS
+Klik => ${invoice.payment_link}
+
+Atau datang ke kantor di jam kerja Hari Senin - Sabtu jam 08:00 sampai 16:00 , Tanggal merah Libur
+
+Untuk informasi lainnya silahkan hubungi nomor Whatsapp
+
+https://wa.me/${csWhatsapp} untuk Customer Service
+https://wa.me/${supportWhatsapp} untuk Support Gangguan
+
+
+Salam Hormat
+${companyName} By PT. MEGA DATA PERKASA 
+connect your future
+#juaranyawifi
+${companyAddress}
+
+_Ini adalah pesan otomatis - mohon untuk tidak membalas langsung ke pesan ini_
+
+Terima kasih.`;
+  }
+
+  /**
+   * Buat pesan reminder jatuh tempo
+   */
+  createPaymentReminderMessage(customer, invoice, packageInfo) {
+    const companyName = process.env.COMPANY_NAME || "VNS NETWORK";
+    const companyAddress =
+      process.env.COMPANY_ADDRESS || "Jl. Masjid Kedung panjang 4/5, 59154";
+    const csWhatsapp = process.env.CS_WHATSAPP || "628895461944";
+    const supportWhatsapp = process.env.SUPPORT_WHATSAPP || "6285724733627";
+
+    const formattedAmount = new Intl.NumberFormat("id-ID", {
+      style: "currency",
+      currency: "IDR",
+      minimumFractionDigits: 0,
+    }).format(invoice.amount || 0);
+
+    return `Salam ${customer.name}
+
+Kami informasikan tagihan anda senilai ${formattedAmount} belum di bayar, Mohon Segera lakukan pembayaran sebelum Account anda terisolir.
+Abaikan pesan ini bila sudah membayar.
+
+*Metode Pembayaran Otomatis*
+Bank Virtual Account, OVO, DANA, LinkAja, ShopeePay, Alfamart, QRIS
+Klik => ${invoice.payment_link}
+
+Untuk informasi lainnya silahkan hubungi nomor Whatsapp
+
+https://wa.me/${csWhatsapp} untuk Customer Service
+https://wa.me/${supportWhatsapp} untuk Support Gangguan
+
+
+
+Salam Hormat
+
+${companyName} By PT. MEGA DATA PERKASA 
+connect your future
+#juaranyawifi
+${companyAddress}
+
+_Ini adalah pesan otomatis - mohon untuk tidak membalas langsung ke pesan ini_
+Terima kasih.`;
+  }
+
+  /**
+   * Buat pesan konfirmasi pembayaran
+   */
+  createPaymentConfirmationMessage(
+    customer,
+    invoice,
+    paymentInfo,
+    packageInfo,
+  ) {
+    const companyName = process.env.COMPANY_NAME || "VNS NETWORK";
+    const companyAddress =
+      process.env.COMPANY_ADDRESS || "Jl. Masjid Kedung panjang 4/5, 59154";
+    const csWhatsapp = process.env.CS_WHATSAPP || "628895461944";
+    const supportWhatsapp = process.env.SUPPORT_WHATSAPP || "6285724733627";
+
+    const formattedAmount = new Intl.NumberFormat("id-ID", {
+      style: "currency",
+      currency: "IDR",
+      minimumFractionDigits: 0,
+    }).format(invoice.amount || 0);
+
+    // Hitung periode baru
+    const startDate = new Date();
+    const endDate = new Date(startDate);
+    endDate.setMonth(endDate.getMonth() + 1);
+
+    const period = `${startDate.toLocaleDateString("id-ID", {
+      day: "2-digit",
+      month: "2-digit",
+      year: "numeric",
+    })} - ${endDate.toLocaleDateString("id-ID", {
+      day: "2-digit",
+      month: "2-digit",
+      year: "numeric",
+    })}`;
+
+    return `Kepada Yth.  ${customer.name}
+
+Terimakasih atas pembayaran Tagihan anda, berikut rinciannya :
+
+ID Pelanggan: ${customer.id}${new Date().getFullYear()}${String(customer.id).padStart(4, "0")}
+Nomor Invoice: ${invoice.invoice_number}
+Total: ${formattedAmount}
+Item: ${packageInfo.name || "Internet"} ${customer.username_pppoe || customer.email || ""} - ${packageInfo.name}
+Period: ${period}
+Status: Paid
+Payment Method: ${paymentInfo.payment_method || "Bank Transfer"}
+
+Untuk informasi lainnya silahkan hubungi nomor Whatsapp
+
+https://wa.me/${csWhatsapp} untuk Customer Service
+https://wa.me/${supportWhatsapp} untuk Support Gangguan
+
+
+Salam Hormat
+${companyName} By PT. MEGA DATA PERKASA 
+connect your future
+#juaranyawifi
+${companyAddress}
+
+
+_Ini adalah pesan otomatis - mohon untuk tidak membalas langsung ke pesan ini_`;
   }
 
   /**
@@ -699,23 +635,47 @@ class FonnteService {
       minimumFractionDigits: 0,
     }).format(invoice.amount || 0);
 
-    return `Halo ${customer.name} 👋
+    return `Salam ${customer.name} 👋
 
-Masa aktif paket internet Anda akan berakhir dalam beberapa hari.
+Kami informasikan Invoice anda telah terbit dan dapat segera dilakukan pembayaran, berikut rinciannya:
 
 📋 Detail Invoice:
-• Invoice: ${invoice.invoice_number}
-• Paket: ${customer.package_name || "Internet"}
+• ID Pelanggan: ${invoice.customer_id}
+• Invoice Number: ${invoice.invoice_number}
 • Harga: ${formattedAmount}
-• Due Date: ${new Date(invoice.due_date).toLocaleDateString("id-ID")}
+• PPN: 0%
+• Discount: 0%
+• Total Tagihan: ${formattedAmount}
+• Item: Internet ${customer.package_name} - ${customer.package_name}
+• Jatuh Tempo: ${new Date(invoice.due_date).toLocaleDateString("id-ID")}
+• Periode: ${new Date(invoice.period_start).toLocaleDateString("id-ID")} - ${new Date(
+      invoice.period_end,
+    ).toLocaleDateString("id-ID")}
 
-💳 BAYAR SEKARANG:
+    Mohon untuk melakukan pembayaran sebelum tanggal jatuh tempo agar layanan Anda tidak terisolir.
+
+💳 Metode Pembayaran Otomatis:
 👉 ${invoice.payment_link}
 
-Silakan klik link di atas untuk melakukan pembayaran online.
-Pembayaran otomatis akan mengaktifkan kembali layanan Anda.
+Atau datang ke kantor di jam kerja hari Senin - Sabtu jam 08:00 - 16:00 WIB. Tanggal merah libur.
+
+Untuk informasi lainnya silahkan hubungi nomor WhatsApp berikut.
+
+https://wa.me/628895461944
+Untuk Customer Service kami.
+https://wa.me/628895461944
+Untuk Support Gangguan
+
+Salam hormat,
+VNS NETWORK By PT. MEGA DATA PERKASA
+connect your future
+#juaranyawifi
+Jl. Masjid Kedung Panjang 4/5, 59154
 
 Terima kasih 🙏
+
+
+Ini adalah pesan otomatis, harap tidak membalas pesan ini.
 ${companyName}${companyPhone ? `\n📞 ${companyPhone}` : ""}`;
   }
 
@@ -736,22 +696,46 @@ ${companyName}${companyPhone ? `\n📞 ${companyPhone}` : ""}`;
       minimumFractionDigits: 0,
     }).format(invoice.amount || 0);
 
-    return `Halo ${customer.name},
+    return `Salam ${customer.name} 👋
 
-Masa aktif paket internet Anda akan berakhir dalam beberapa hari.
+Kami informasikan Invoice anda telah terbit dan dapat segera dilakukan pembayaran, berikut rinciannya:
 
 📋 Detail Invoice:
-• Invoice: ${invoice.invoice_number}
-• Paket: ${customer.package_name || "Internet"}
+• ID Pelanggan: ${invoice.customer_id}
+• Invoice Number: ${invoice.invoice_number}
 • Harga: ${formattedAmount}
-• Due Date: ${new Date(invoice.due_date).toLocaleDateString("id-ID")}
+• PPN: 0%
+• Discount: 0%
+• Total Tagihan: ${formattedAmount}
+• Item: Internet ${customer.package_name} - ${customer.package_name}
+• Jatuh Tempo: ${new Date(invoice.due_date).toLocaleDateString("id-ID")}
+• Periode: ${new Date(invoice.period_start).toLocaleDateString("id-ID")} - ${new Date(
+      invoice.period_end,
+    ).toLocaleDateString("id-ID")}
 
-💳 PEMBAYARAN:
-Silakan lakukan pembayaran melalui transfer bank atau datang langsung ke kantor kami.
+    Mohon untuk melakukan pembayaran sebelum tanggal jatuh tempo agar layanan Anda tidak terisolir.
 
-Jika sudah membayar, silakan konfirmasi ke admin.
+💳 Metode Pembayaran:
+Mohon Maaf , Untuk saat ini metode pembayaran otomatis belum tersedia.
+Silakan datang ke kantor di jam kerja hari Senin - Sabtu jam 08:00 - 16:00 WIB. Tanggal merah libur.
 
-Terima kasih,
+Untuk informasi lainnya silahkan hubungi nomor WhatsApp berikut.
+
+https://wa.me/628895461944
+Untuk Customer Service kami.
+https://wa.me/628895461944
+Untuk Support Gangguan
+
+Salam hormat,
+VNS NETWORK By PT. MEGA DATA PERKASA
+connect your future
+#juaranyawifi
+Jl. Masjid Kedung Panjang 4/5, 59154
+
+Terima kasih 🙏
+
+
+Ini adalah pesan otomatis, harap tidak membalas pesan ini.
 ${companyName}${companyPhone ? `\n📞 ${companyPhone}` : ""}`;
   }
 

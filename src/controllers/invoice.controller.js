@@ -1,10 +1,11 @@
 const db = require("../config/database"); // Tambahkan ini di atas
 const InvoiceService = require("../services/invoice.service");
 const InvoiceUtils = require("../utils/invoice");
+const messagingService = require("../services/messaging.service");
 
 class InvoiceController {
   // Get all invoices
-  static async getInvoices(req, res) {
+  static async getInvoices(req, res, next) {
     try {
       const {
         page = 1,
@@ -16,6 +17,18 @@ class InvoiceController {
         search,
       } = req.query;
 
+      // Validasi input
+      const pageNum = parseInt(page);
+      const limitNum = parseInt(limit);
+
+      if (isNaN(pageNum) || pageNum < 1) {
+        throw new AppError("Invalid page number", 400);
+      }
+
+      if (isNaN(limitNum) || limitNum < 1 || limitNum > 100) {
+        throw new AppError("Limit must be between 1 and 100", 400);
+      }
+
       const result = await InvoiceService.getInvoices(
         {
           customer_id,
@@ -24,8 +37,8 @@ class InvoiceController {
           date_to,
           search,
         },
-        page,
-        limit,
+        pageNum,
+        limitNum,
       );
 
       res.json({
@@ -34,42 +47,45 @@ class InvoiceController {
         pagination: result.pagination,
       });
     } catch (error) {
-      res.status(500).json({
-        success: false,
-        message: error.message,
-      });
+      next(error);
     }
   }
 
-  // Get invoice by ID
-  static async getInvoice(req, res) {
+  // Get invoice by ID - DENGAN ERROR HANDLING YANG LEBIH BAIK
+  static async getInvoice(req, res, next) {
     try {
       const { id } = req.params;
 
+      if (!id || isNaN(parseInt(id))) {
+        throw new AppError("Invalid invoice ID", 400);
+      }
+
       const invoice = await InvoiceService.getInvoiceById(id);
+
+      if (!invoice) {
+        throw new AppError("Invoice not found", 404);
+      }
 
       res.json({
         success: true,
         data: invoice,
       });
     } catch (error) {
-      if (error.message === "Invoice not found") {
-        return res.status(404).json({
-          success: false,
-          message: error.message,
-        });
-      }
-      res.status(500).json({
-        success: false,
-        message: error.message,
-      });
+      next(error);
     }
   }
 
   // Create manual invoice
-  static async createInvoice(req, res) {
+  // Create manual invoice - DENGAN TRANSACTION
+  static async createInvoice(req, res, next) {
+    const connection = await db.getConnection();
+
     try {
-      console.log("📝 Creating invoice with data:", req.body);
+      logger.info("Creating invoice", {
+        userId: req.user?.id,
+        customerId: req.body.customer_id,
+        data: req.body,
+      });
 
       const {
         customer_id,
@@ -93,48 +109,44 @@ class InvoiceController {
         items = [],
       } = req.body;
 
-      // VALIDASI: Pastikan customer_id ada
+      // VALIDASI DASAR
       if (!customer_id) {
-        return res.status(400).json({
-          success: false,
-          message: "Customer ID is required",
-        });
+        throw new AppError("Customer ID is required", 400);
       }
 
-      // Cek apakah customer exists di database - PERBAIKAN DI SINI
-      console.log(`🔍 Checking customer with ID: ${customer_id}`);
-      const [customerRows] = await db.query(
-        "SELECT id, name, phone FROM customers WHERE id = ?", // HAPUS 'code'
+      if (!amount || parseFloat(amount) <= 0) {
+        throw new AppError("Valid amount is required", 400);
+      }
+
+      // MULAI TRANSACTION
+      await connection.beginTransaction();
+
+      // CEK CUSTOMER - GUNAKAN CONNECTION YANG SAMA
+      const [customerRows] = await connection.query(
+        "SELECT id, name, phone, email FROM customers WHERE id = ? AND status = 'active'",
         [customer_id],
       );
 
       if (customerRows.length === 0) {
-        return res.status(400).json({
-          success: false,
-          message: `Customer with ID ${customer_id} not found`,
-        });
+        await connection.rollback();
+        throw new AppError(
+          `Customer with ID ${customer_id} not found or inactive`,
+          404,
+        );
       }
 
-      console.log(
-        `✅ Customer found: ${customerRows[0].name} (Phone: ${customerRows[0].phone})`,
-      );
+      const customer = customerRows[0];
+      logger.info(`Customer found: ${customer.name}`, {
+        customerId: customer_id,
+      });
 
-      // Validate amount
-      if (!amount || parseFloat(amount) <= 0) {
-        return res.status(400).json({
-          success: false,
-          message: "Valid amount is required",
-        });
-      }
-
-      // Generate invoice number
+      // GENERATE INVOICE NUMBER
       const invoice_number = await InvoiceUtils.generateInvoiceNumber();
-      console.log(`📄 Generated invoice number: ${invoice_number}`);
+      logger.info(`Generated invoice number: ${invoice_number}`);
 
-      // Get current date for issue_date if not provided
+      // TANGGAL
       const today = new Date().toISOString().split("T")[0];
 
-      // Calculate due date if not provided (default 7 days)
       let finalDueDate = due_date;
       if (!finalDueDate) {
         const dueDateObj = new Date();
@@ -142,26 +154,25 @@ class InvoiceController {
         finalDueDate = dueDateObj.toISOString().split("T")[0];
       }
 
-      // Get package name if not provided
+      // PACKAGE NAME
       let finalPackageName = package_name;
       if (!finalPackageName && package_id) {
         try {
-          const [packageRows] = await db.query(
-            "SELECT name FROM packages WHERE id = ?",
+          const [packageRows] = await connection.query(
+            "SELECT name FROM packages WHERE id = ? AND status = 'active'",
             [package_id],
           );
           if (packageRows.length > 0) {
             finalPackageName = packageRows[0].name;
           }
         } catch (packageError) {
-          console.warn(
-            "⚠️ Could not fetch package name:",
-            packageError.message,
-          );
+          logger.warn("Could not fetch package name", {
+            error: packageError.message,
+          });
         }
       }
 
-      // Create invoice data
+      // CREATE INVOICE DATA
       const invoiceData = {
         invoice_number,
         customer_id: parseInt(customer_id),
@@ -180,18 +191,42 @@ class InvoiceController {
         payment_method: payment_method || null,
         reference_number: reference_number || null,
         payment_notes: payment_notes || null,
-        created_by: parseInt(customer_id), // Set created_by ke customer_id
+        created_by: req.user?.id || customer_id, // Gunakan user yang login jika ada
         is_recurring: is_recurring ? 1 : 0,
         next_billing_date: next_billing_date || null,
       };
 
-      console.log("📦 Invoice data prepared:", invoiceData);
-
-      // Call service to create invoice
+      // PANGGIL SERVICE DENGAN TRANSACTION
       const result = await InvoiceService.createManualInvoice(
         invoiceData,
         items,
+        connection, // Kirim connection untuk transaction
       );
+
+      // COMMIT TRANSACTION
+      await connection.commit();
+
+      logger.info("Invoice created successfully", {
+        invoiceId: result.id,
+        invoiceNumber: invoice_number,
+        customerId: customer_id,
+      });
+
+      // KIRIM NOTIFIKASI (ASINKRON)
+      try {
+        await messagingService.sendInvoiceNotification({
+          customerId: customer_id,
+          invoiceId: result.id,
+          invoiceNumber: invoice_number,
+          amount: amount,
+          dueDate: finalDueDate,
+        });
+      } catch (notifError) {
+        logger.error("Failed to send notification", {
+          error: notifError.message,
+        });
+        // Jangan gagalkan invoice creation karena notifikasi gagal
+      }
 
       res.json({
         success: true,
@@ -199,14 +234,19 @@ class InvoiceController {
         data: result,
       });
     } catch (error) {
-      console.error("❌ Create invoice error:", error);
+      // ROLLBACK JIKA ADA ERROR
+      if (connection) await connection.rollback();
 
-      res.status(500).json({
-        success: false,
-        message: "Failed to create invoice",
-        error:
-          process.env.NODE_ENV === "development" ? error.message : undefined,
+      logger.error("Create invoice error", {
+        error: error.message,
+        stack: error.stack,
+        userId: req.user?.id,
       });
+
+      next(error);
+    } finally {
+      // RELEASE CONNECTION
+      if (connection) connection.release();
     }
   }
 

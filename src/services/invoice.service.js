@@ -231,6 +231,40 @@ class InvoiceService {
 
       const invoice = invoices[0];
 
+      // Kirim pesan invoice baru
+      try {
+        // Get customer details
+        const [customerRows] = await db.query(
+          "SELECT * FROM customers WHERE id = ?",
+          [invoiceData.customer_id],
+        );
+
+        if (customerRows.length > 0) {
+          const customer = customerRows[0];
+
+          // Get package info
+          const [packageRows] = await db.query(
+            "SELECT * FROM packages WHERE id = ?",
+            [customer.package_id],
+          );
+
+          const packageInfo = packageRows[0] || { name: "Paket Internet" };
+
+          // Kirim pesan invoice baru
+          await fonnteService.sendInvoiceCreated(
+            customer,
+            invoice,
+            packageInfo,
+          );
+          console.log(`✅ Invoice created message sent to ${customer.name}`);
+        }
+      } catch (messageError) {
+        console.error(
+          "❌ Failed to send invoice created message:",
+          messageError,
+        );
+      }
+
       return {
         id: invoiceId,
         invoice_number: invoiceNumber,
@@ -405,14 +439,22 @@ class InvoiceService {
 
       console.log(`💳 Processing payment for invoice ID: ${invoiceId}`);
 
-      // 1. Get invoice
+      // 1. Get invoice with more customer details
       const [invoices] = await connection.query(
-        `SELECT i.*, c.id as customer_id, c.name as customer_name, c.expired_at as customer_expired,
-              c.package_id, p.duration_days
-       FROM invoices i
-       JOIN customers c ON i.customer_id = c.id
-       LEFT JOIN packages p ON c.package_id = p.id
-       WHERE i.id = ?`,
+        `SELECT i.*, 
+        c.id as customer_id, 
+        c.name as customer_name, 
+        c.phone as customer_phone,
+        c.username_pppoe,
+        c.expired_at as customer_expired,
+        c.package_id, 
+        p.duration_days,
+        p.name as package_name,
+        p.price as package_price
+      FROM invoices i
+      JOIN customers c ON i.customer_id = c.id
+      LEFT JOIN packages p ON c.package_id = p.id
+      WHERE i.id = ?`,
         [invoiceId],
       );
 
@@ -432,14 +474,14 @@ class InvoiceService {
       if (paymentAmount > invoiceAmount)
         throw new Error("Payment amount exceeds invoice amount");
 
-      // 2. Buat payment record (tanpa customer_id)
+      // 2. Buat payment record
       const paymentRef =
         paymentData.reference ||
         `PAY-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
 
       const [paymentResult] = await connection.query(
         `INSERT INTO payments (invoice_id, amount, payment_method, reference, notes, created_at)
-       VALUES (?, ?, ?, ?, ?, NOW())`,
+      VALUES (?, ?, ?, ?, ?, NOW())`,
         [
           invoiceId,
           paymentAmount,
@@ -449,17 +491,17 @@ class InvoiceService {
         ],
       );
 
-      // 3. Update invoice status - HINDARI mengisi paid_by jika ada constraint error
+      // 3. Update invoice status
       try {
         await connection.query(
           `UPDATE invoices SET
-          status = 'paid',
-          paid_date = NOW(),
-          payment_method = ?,
-          reference_number = ?,
-          payment_notes = ?,
-          updated_at = NOW()
-         WHERE id = ?`,
+        status = 'paid',
+        paid_date = NOW(),
+        payment_method = ?,
+        reference_number = ?,
+        payment_notes = ?,
+        updated_at = NOW()
+        WHERE id = ?`,
           [
             paymentData.payment_method,
             paymentRef,
@@ -468,7 +510,6 @@ class InvoiceService {
           ],
         );
       } catch (updateError) {
-        // Jika error karena foreign key constraint, coba tanpa paid_by
         if (
           updateError.code === "ER_NO_REFERENCED_ROW_2" ||
           updateError.errno === 1452
@@ -478,13 +519,13 @@ class InvoiceService {
           );
           await connection.query(
             `UPDATE invoices SET
-            status = 'paid',
-            paid_date = NOW(),
-            payment_method = ?,
-            reference_number = ?,
-            payment_notes = ?,
-            updated_at = NOW()
-           WHERE id = ?`,
+          status = 'paid',
+          paid_date = NOW(),
+          payment_method = ?,
+          reference_number = ?,
+          payment_notes = ?,
+          updated_at = NOW()
+          WHERE id = ?`,
             [
               paymentData.payment_method,
               paymentRef,
@@ -518,10 +559,10 @@ class InvoiceService {
 
         await connection.query(
           `UPDATE customers SET
-          expired_at = ?,
-          status = 'active',
-          updated_at = NOW()
-         WHERE id = ?`,
+        expired_at = ?,
+        status = 'active',
+        updated_at = NOW()
+        WHERE id = ?`,
           [newExpiryStr, invoice.customer_id],
         );
 
@@ -536,7 +577,7 @@ class InvoiceService {
         if (logTables.length > 0) {
           await connection.query(
             `INSERT INTO logs (action, entity, entity_id, description, source, admin_id, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, NOW())`,
+          VALUES (?, ?, ?, ?, ?, ?, NOW())`,
             [
               "invoice_paid",
               "invoice",
@@ -556,14 +597,64 @@ class InvoiceService {
       // 6. Return success response
       const [updatedInvoices] = await connection.query(
         `SELECT i.*, c.name as customer_name, c.expired_at as customer_expired
-       FROM invoices i JOIN customers c ON i.customer_id = c.id
-       WHERE i.id = ?`,
+      FROM invoices i JOIN customers c ON i.customer_id = c.id
+      WHERE i.id = ?`,
         [invoiceId],
       );
 
       const updatedInvoice = updatedInvoices[0];
 
-      // PERBAIKAN: Hanya return data, tanpa wrapper success/message
+      // 7. Kirim pesan konfirmasi pembayaran via WhatsApp
+      try {
+        const fonnteService = require("./fonnte.service");
+
+        const customerData = {
+          id: invoice.customer_id,
+          name: invoice.customer_name,
+          phone: invoice.customer_phone,
+          email: invoice.customer_email || "",
+          username_pppoe: invoice.username_pppoe || "",
+        };
+
+        const paymentInfo = {
+          id: paymentResult.insertId,
+          payment_method: paymentData.payment_method,
+          amount: paymentAmount,
+          reference: paymentRef,
+        };
+
+        const packageInfo = {
+          name: invoice.package_name || "Paket Internet",
+          price: invoice.package_price || "0",
+        };
+
+        console.log(
+          `📤 Sending payment confirmation to ${customerData.name}...`,
+        );
+
+        const messageResult = await fonnteService.sendPaymentConfirmation(
+          customerData,
+          updatedInvoice,
+          paymentInfo,
+          packageInfo,
+        );
+
+        if (messageResult.success) {
+          console.log(`✅ Payment confirmation sent successfully`);
+        } else {
+          console.error(
+            `❌ Failed to send payment confirmation:`,
+            messageResult.error,
+          );
+        }
+      } catch (whatsappError) {
+        console.error(
+          `❌ Error sending WhatsApp confirmation:`,
+          whatsappError.message,
+        );
+        // Jangan throw error, payment tetap berhasil
+      }
+
       return {
         invoice: updatedInvoice,
         payment: {
