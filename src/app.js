@@ -33,16 +33,15 @@ const app = express();
 app.use(helmet());
 
 const allowedOrigins = [
-  /\.vercel\.app$/, // Izinkan semua subdomain vercel.app
-  /\.vercel\.app:(\d+)$/, // Izinkan dengan port
+  "https://frontend-billing-wifi.vercel.app",
+  "https://billing.fstnews.my.id",
   "http://localhost:3000",
   "http://localhost:8080",
-  "https://billing.fstnews.my.id",
 ];
 
 const corsOptions = {
   origin: function (origin, callback) {
-    // Allow requests with no origin (like mobile apps or curl requests)
+    // Allow no-origin (curl, server-to-server, health check)
     if (!origin) return callback(null, true);
 
     // Allow all Vercel subdomains
@@ -51,13 +50,15 @@ const corsOptions = {
       return callback(null, true);
     }
 
-    if (allowedOrigins.indexOf(origin) !== -1) {
+    if (allowedOrigins.includes(origin)) {
       console.log(`✅ Allowing origin: ${origin}`);
-      callback(null, true);
-    } else {
-      console.log("❌ CORS blocked for origin:", origin);
-      callback(new Error("Not allowed by CORS"));
+      return callback(null, true);
     }
+
+    console.warn("⚠️ CORS blocked (but responded safely):", origin);
+
+    // ⚠️ PENTING: JANGAN ERROR
+    return callback(null, false);
   },
   credentials: true,
   methods: ["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
@@ -67,13 +68,7 @@ const corsOptions = {
     "X-Requested-With",
     "Accept",
     "Origin",
-    "Cache-Control", // TAMBAHKAN INI
-    "Pragma", // TAMBAHKAN INI
-    "Expires", // TAMBAHKAN INI
-    "If-Modified-Since", // TAMBAHKAN INI
   ],
-  exposedHeaders: ["Content-Range", "X-Content-Range"],
-  maxAge: 86400,
 };
 
 app.use(cors(corsOptions));
