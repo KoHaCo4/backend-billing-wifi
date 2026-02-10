@@ -20,7 +20,7 @@ const authenticate = async (req, res, next) => {
     console.log("✅ Token found, verifying...");
     const decoded = TokenService.verifyToken(token, "access");
 
-    // Check if admin exists
+    // Check if admin exists and get role
     const [admins] = await db.query(
       "SELECT id, email, role, status FROM admins WHERE id = ?",
       [decoded.id],
@@ -42,21 +42,24 @@ const authenticate = async (req, res, next) => {
       });
     }
 
-    // Attach user to request
+    // Attach user to request with role
     req.user = {
       id: decoded.id,
       email: decoded.email,
-      role: decoded.role,
+      role: admins[0].role, // Get role from database
     };
 
-    console.log("✅ Auth successful for user:", req.user.email);
+    console.log(
+      "✅ Auth successful for user:",
+      req.user.email,
+      "Role:",
+      req.user.role,
+    );
 
-    // **PASTIKAN next() dipanggil**
     return next();
   } catch (error) {
     console.error("❌ Auth failed:", error.message);
 
-    // **PERBAIKAN: Pastikan error message tidak mengandung "next"**
     const safeMessage = error.message.replace(
       /next is not a function/gi,
       "authentication failed",
@@ -91,7 +94,7 @@ const authorize = (...roles) => {
       });
     }
 
-    if (!roles.includes(req.user.role)) {
+    if (!roles.includes(req.user.role) && req.user.role !== "superadmin") {
       return res.status(403).json({
         success: false,
         message: "Insufficient permissions",
@@ -102,4 +105,108 @@ const authorize = (...roles) => {
   };
 };
 
-module.exports = { authenticate, authorize };
+// Middleware untuk authorize berdasarkan ownership
+const authorizeDataAccess = (modelType = "customer") => {
+  return async (req, res, next) => {
+    try {
+      const { id: adminId, role } = req.user;
+
+      // Superadmin bisa akses semua
+      if (role === "superadmin") {
+        return next();
+      }
+
+      const dataId = req.params.id || req.params.customerId;
+
+      if (!dataId) {
+        return res.status(400).json({
+          success: false,
+          message: "Data ID is required",
+        });
+      }
+
+      // Check access berdasarkan model type
+      let query;
+      let params;
+
+      switch (modelType) {
+        case "customer":
+          query = `
+            SELECT id FROM customers 
+            WHERE id = ? 
+            AND (
+              admin_id = ? 
+              OR (is_shared = 1 AND JSON_CONTAINS(shared_with, CAST(? AS JSON)))
+            )
+          `;
+          params = [dataId, adminId, JSON.stringify([adminId])];
+          break;
+
+        case "invoice":
+          query = `
+            SELECT id FROM invoices 
+            WHERE id = ? 
+            AND (
+              admin_id = ? 
+              OR (is_shared = 1 AND JSON_CONTAINS(shared_with, CAST(? AS JSON)))
+            )
+          `;
+          params = [dataId, adminId, JSON.stringify([adminId])];
+          break;
+
+        case "package":
+          query = `
+            SELECT id FROM packages 
+            WHERE id = ? 
+            AND (
+              admin_id = ? 
+              OR (is_shared = 1 AND JSON_CONTAINS(shared_with, CAST(? AS JSON)))
+            )
+          `;
+          params = [dataId, adminId, JSON.stringify([adminId])];
+          break;
+
+        case "router":
+          query = `
+            SELECT id FROM routers 
+            WHERE id = ? 
+            AND (
+              admin_id = ? 
+              OR (is_shared = 1 AND JSON_CONTAINS(shared_with, CAST(? AS JSON)))
+            )
+          `;
+          params = [dataId, adminId, JSON.stringify([adminId])];
+          break;
+
+        default:
+          return res.status(400).json({
+            success: false,
+            message: "Invalid model type",
+          });
+      }
+
+      const [rows] = await db.execute(query, params);
+
+      if (rows.length === 0) {
+        return res.status(403).json({
+          success: false,
+          message: "Access denied to this data",
+        });
+      }
+
+      next();
+    } catch (error) {
+      console.error("Data access authorization error:", error);
+      return res.status(500).json({
+        success: false,
+        message: "Authorization error",
+      });
+    }
+  };
+};
+
+module.exports = {
+  authenticate,
+  authorize,
+  authorizeDataAccess,
+};

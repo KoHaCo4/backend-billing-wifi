@@ -1052,67 +1052,155 @@ class MikrotikService {
 
   // Create PPPoE profile if not exists
   // mikrotik.service.js - Optimize with better timeout
-  async createPPPoEProfile(profileName, rateLimit = "10M/10M") {
+  // Perbaiki method createPPPoEProfile
+  async createPPPoEProfile(profileName, rateLimit = "20M/20M") {
     let client = null;
-
     try {
-      // Connect dengan timeout 8 detik
-      client = await this.connect();
-
-      // Cek apakah profil sudah ada - dengan timeout 3 detik
-      const checkPromise = client.write("/ppp/profile/print", [
-        `?name=${profileName}`,
-      ]);
-
-      const timeoutPromise = new Promise((_, reject) =>
-        setTimeout(() => reject(new Error("Timeout checking profile")), 3000),
+      console.log(
+        `🔧 Creating PPPoE profile: ${profileName} with rate limit: ${rateLimit}`,
       );
 
-      const profiles = await Promise.race([checkPromise, timeoutPromise]);
+      // Parse rate limit
+      let rateLimitUp = "20M";
+      let rateLimitDown = "20M";
 
-      if (profiles.length > 0) {
-        console.log(`PPPoE profile ${profileName} already exists`);
-        return {
-          success: true,
-          message: "Profile already exists",
-          exists: true,
-        };
+      if (rateLimit && rateLimit !== "unlimited") {
+        const match = rateLimit.match(/(\d+[MGK])\/(\d+[MGK])/i);
+        if (match) {
+          rateLimitUp = match[1];
+          rateLimitDown = match[2];
+        }
       }
 
-      // Buat profil baru - dengan timeout 5 detik
-      const createPromise = client.write("/ppp/profile/add", [
-        `=name=${profileName}`,
-        `=rate-limit=${rateLimit}`,
-        "=local-address=10.0.0.1",
-        "=remote-address=pppoe",
-        "=only-one=yes",
-        "=change-tcp-mss=yes",
-      ]);
+      client = await this.connect();
 
-      const createTimeout = new Promise((_, reject) =>
-        setTimeout(() => reject(new Error("Timeout creating profile")), 5000),
+      // Method 1: Coba dengan format yang lebih sederhana
+      console.log(`📤 Sending command to create profile: ${profileName}`);
+
+      // Cek dulu apakah profile sudah ada
+      try {
+        const existingProfiles = await client.write("/ppp/profile/print");
+        const profileExists = existingProfiles.some(
+          (p) => p.name === profileName,
+        );
+
+        if (profileExists) {
+          console.log(
+            `ℹ️ Profile "${profileName}" already exists, updating rate limit`,
+          );
+
+          // Update existing profile
+          await client.write("/ppp/profile/set", [
+            `?name=${profileName}`,
+            `=rate-limit=${rateLimitUp}/${rateLimitDown}`,
+          ]);
+
+          console.log(`✅ PPPoE profile updated: ${profileName}`);
+          return {
+            success: true,
+            message: "PPPoE profile updated",
+            exists: true,
+          };
+        }
+      } catch (checkError) {
+        console.warn(
+          `⚠️ Could not check existing profiles: ${checkError.message}`,
+        );
+      }
+
+      // Method 2: Coba gunakan format yang berbeda untuk create
+      try {
+        // Coba dengan format parameter yang berbeda
+        await client.write("/ppp/profile/add", [
+          `=name=${profileName}`,
+          `=rate-limit=${rateLimitUp}/${rateLimitDown}`,
+        ]);
+
+        console.log(`✅ PPPoE profile created (simple method): ${profileName}`);
+        return {
+          success: true,
+          message: "PPPoE profile created",
+          created: true,
+        };
+      } catch (simpleError) {
+        console.warn(
+          `⚠️ Simple method failed, trying full method: ${simpleError.message}`,
+        );
+
+        // Method 3: Coba dengan parameter lengkap tapi format berbeda
+        await client.write("/ppp/profile/add", [
+          `name=${profileName}`,
+          `rate-limit=${rateLimitUp}/${rateLimitDown}`,
+          `local-address=10.0.0.1`,
+          `remote-address=pppoe-pool`,
+        ]);
+
+        console.log(`✅ PPPoE profile created (full method): ${profileName}`);
+        return {
+          success: true,
+          message: "PPPoE profile created",
+          created: true,
+        };
+      }
+    } catch (error) {
+      console.error(
+        `❌ Failed to create/update PPPoE profile: ${error.message}`,
       );
 
-      await Promise.race([createPromise, createTimeout]);
+      // Coba method alternatif dengan API yang lebih rendah level
+      if (
+        error.message.includes("!empty") ||
+        error.message.includes("unknown reply")
+      ) {
+        console.log("🔄 Trying alternative method with raw commands...");
 
-      console.log(`✅ PPPoE profile created: ${profileName}`);
-      return {
-        success: true,
-        message: "PPPoE profile created",
-        created: true,
-      };
-    } catch (error) {
-      console.error(`❌ Failed to create PPPoE profile: ${error.message}`);
+        try {
+          // Gunakan command langsung sebagai fallback
+          const result = await this.sendRawCommand(
+            `/ppp/profile add name="${profileName}" rate-limit="${rateLimit}"`,
+          );
+          console.log(`✅ PPPoE profile created (raw command): ${profileName}`);
+          return {
+            success: true,
+            message: "PPPoE profile created via raw command",
+            created: true,
+          };
+        } catch (rawError) {
+          console.error(`❌ Raw command also failed: ${rawError.message}`);
+          throw new Error(
+            `Mikrotik error: Failed to create profile after multiple attempts - ${rawError.message}`,
+          );
+        }
+      }
+
       throw new Error(`Mikrotik error: ${error.message}`);
     } finally {
       if (client) {
         try {
           await client.close();
+          console.log(`🔌 Disconnected from MikroTik`);
         } catch (closeError) {
           console.warn("Failed to close connection:", closeError.message);
         }
       }
     }
+  }
+
+  // Tambahkan method baru untuk raw command
+  async sendRawCommand(command) {
+    return new Promise((resolve, reject) => {
+      if (!this.client) {
+        return reject(new Error("Not connected to MikroTik"));
+      }
+
+      this.client.write(command, (error, results) => {
+        if (error) {
+          reject(error);
+        } else {
+          resolve(results);
+        }
+      });
+    });
   }
 
   // Update PPPoE profile rate limit

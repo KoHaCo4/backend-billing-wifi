@@ -3,18 +3,35 @@ const logger = require("../utils/logger");
 const MikrotikService = require("./mikrotik.service");
 
 class PackageService {
-  // Get all packages (with optional filter)
-  static async getAllPackages(showInactive = false) {
+  // Get all packages dengan filter multi-user
+  static async getAllPackages(
+    showInactive = false,
+    adminId = null,
+    role = null,
+  ) {
     try {
-      let query = "SELECT * FROM packages";
+      let whereClause = "WHERE 1=1";
+      const params = [];
 
-      if (!showInactive) {
-        query += " WHERE is_active = 1";
+      // Filter berdasarkan admin jika bukan superadmin
+      if (adminId && role !== "superadmin") {
+        whereClause += `
+          AND (
+            admin_id = ? 
+            OR (is_shared = 1 AND JSON_CONTAINS(shared_with, CAST(? AS JSON)))
+          )
+        `;
+        params.push(adminId, JSON.stringify([adminId]));
       }
 
-      query += " ORDER BY created_at DESC";
+      if (!showInactive) {
+        whereClause += " AND is_active = 1";
+      }
 
-      const [packages] = await db.query(query);
+      whereClause += " ORDER BY created_at DESC";
+
+      const query = `SELECT * FROM packages ${whereClause}`;
+      const [packages] = await db.query(query, params);
       return packages;
     } catch (error) {
       console.error("Error in PackageService.getAllPackages:", error);
@@ -22,8 +39,7 @@ class PackageService {
     }
   }
 
-  // Create package
-  // package.service.js - Update createPackage
+  // Create package dengan admin_id
   static async createPackage(data, adminId) {
     const connection = await db.getConnection();
     console.log("🎯 SERVICE RECEIVED DATA:", {
@@ -32,8 +48,9 @@ class PackageService {
       selected_routers_length: data.selected_routers
         ? data.selected_routers.length
         : 0,
-      full_data_keys: Object.keys(data),
+      admin_id: adminId,
     });
+
     try {
       await connection.beginTransaction();
 
@@ -81,14 +98,15 @@ class PackageService {
       }
 
       // ============================================
-      // 2. BUAT PACKAGE DI DATABASE
+      // 2. BUAT PACKAGE DI DATABASE DENGAN ADMIN_ID
       // ============================================
       const query = `
       INSERT INTO packages (
         name, duration_days, price, shared_users, 
         rate_limit, type, is_active, profile_name, 
-        mikrotik_status, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())
+        mikrotik_status, admin_id, is_shared, shared_with,
+        created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())
     `;
 
       // Default mikrotik_status berdasarkan apakah ada router yang dipilih
@@ -105,6 +123,9 @@ class PackageService {
         data.is_active !== undefined ? (data.is_active ? 1 : 0) : 1,
         profileName,
         mikrotikStatus,
+        adminId, // Tambahkan admin_id
+        data.is_shared ? 1 : 0,
+        data.shared_with ? JSON.stringify(data.shared_with) : null,
       ];
 
       const [result] = await connection.query(query, values);
@@ -252,6 +273,9 @@ class PackageService {
           duration_days: newPackage.duration_days,
           profile_name: newPackage.profile_name,
           mikrotik_status: newPackage.mikrotik_status,
+          admin_id: newPackage.admin_id,
+          is_shared: newPackage.is_shared,
+          shared_with: newPackage.shared_with,
           mikrotik_results: mikrotikResults,
           routers_count: mikrotikResults.length,
         },
@@ -280,14 +304,30 @@ class PackageService {
     }
   }
 
-  // Update package
-  static async updatePackage(id, data, adminId) {
+  // Update package dengan authorization
+  static async updatePackage(id, data, adminId, role) {
     const connection = await db.getConnection();
 
     try {
       await connection.beginTransaction();
 
       console.log(`✏️ Updating package ${id} with data:`, data);
+
+      // Cek akses terlebih dahulu
+      if (role !== "superadmin") {
+        const [packages] = await connection.query(
+          "SELECT admin_id FROM packages WHERE id = ?",
+          [id],
+        );
+
+        if (packages.length === 0) {
+          throw new Error("Package not found");
+        }
+
+        if (packages[0].admin_id !== adminId) {
+          throw new Error("Access denied to update this package");
+        }
+      }
 
       // Get current package data
       const [currentPackages] = await connection.query(
@@ -345,6 +385,18 @@ class PackageService {
         updateValues.push(data.profile_name);
       }
 
+      if (data.is_shared !== undefined) {
+        updateFields.push("is_shared = ?");
+        updateValues.push(data.is_shared ? 1 : 0);
+      }
+
+      if (data.shared_with !== undefined) {
+        updateFields.push("shared_with = ?");
+        updateValues.push(
+          data.shared_with ? JSON.stringify(data.shared_with) : null,
+        );
+      }
+
       // Tambah updated_at
       updateFields.push("updated_at = NOW()");
 
@@ -366,7 +418,7 @@ class PackageService {
       if (data.rate_limit && data.rate_limit !== currentPackage.rate_limit) {
         console.log("🔄 Rate limit changed, updating MikroTik profiles...");
 
-        // Get active routers
+        // Get routers yang terkait dengan package ini
         const [routers] = await connection.query(
           'SELECT * FROM routers WHERE status = "active"',
         );
@@ -431,14 +483,32 @@ class PackageService {
     }
   }
 
-  // Delete package dengan validasi
-  static async deletePackage(id, adminId) {
+  // Delete package dengan authorization
+  static async deletePackage(id, adminId, role) {
     const connection = await db.getConnection();
 
     try {
       await connection.beginTransaction();
 
-      console.log(`🗑️ Attempting to delete package ID: ${id}`);
+      console.log(
+        `🗑️ Attempting to delete package ID: ${id}, Admin: ${adminId}, Role: ${role}`,
+      );
+
+      // 1. Cek akses terlebih dahulu
+      if (role !== "superadmin") {
+        const [packages] = await connection.query(
+          "SELECT admin_id FROM packages WHERE id = ?",
+          [id],
+        );
+
+        if (packages.length === 0) {
+          throw new Error("Package not found");
+        }
+
+        if (packages[0].admin_id !== adminId) {
+          throw new Error("Access denied to delete this package");
+        }
+      }
 
       // 1. Cek apakah package ada
       const [packages] = await connection.query(
@@ -611,12 +681,24 @@ class PackageService {
     }
   }
 
-  // Get package by ID
-  static async getPackageById(id) {
+  // Get package by ID dengan authorization
+  static async getPackageById(id, adminId = null, role = null) {
     try {
-      const [packages] = await db.query("SELECT * FROM packages WHERE id = ?", [
-        id,
-      ]);
+      let query = "SELECT * FROM packages WHERE id = ?";
+      const params = [id];
+
+      // Tambahkan filter authorization jika bukan superadmin
+      if (adminId && role !== "superadmin") {
+        query += `
+          AND (
+            admin_id = ? 
+            OR (is_shared = 1 AND JSON_CONTAINS(shared_with, CAST(? AS JSON)))
+          )
+        `;
+        params.push(adminId, JSON.stringify([adminId]));
+      }
+
+      const [packages] = await db.query(query, params);
       return packages[0] || null;
     } catch (error) {
       console.error("Error in PackageService.getPackageById:", error);
@@ -624,12 +706,27 @@ class PackageService {
     }
   }
 
-  // Get active packages for customer selection
-  static async getActivePackages() {
+  // Get active packages untuk customer selection dengan filter multi-user
+  static async getActivePackages(adminId = null, role = null) {
     try {
-      const [packages] = await db.query(
-        "SELECT * FROM packages WHERE is_active = 1 ORDER BY price ASC",
-      );
+      let whereClause = "WHERE is_active = 1";
+      const params = [];
+
+      // Filter berdasarkan admin jika bukan superadmin
+      if (adminId && role !== "superadmin") {
+        whereClause += `
+          AND (
+            admin_id = ? 
+            OR (is_shared = 1 AND JSON_CONTAINS(shared_with, CAST(? AS JSON)))
+          )
+        `;
+        params.push(adminId, JSON.stringify([adminId]));
+      }
+
+      whereClause += " ORDER BY price ASC";
+
+      const query = `SELECT * FROM packages ${whereClause}`;
+      const [packages] = await db.query(query, params);
       return packages;
     } catch (error) {
       console.error("Error in PackageService.getActivePackages:", error);
@@ -637,9 +734,25 @@ class PackageService {
     }
   }
 
-  // Toggle package active status
-  static async togglePackageStatus(id, currentStatus) {
+  // Toggle package active status dengan authorization
+  static async togglePackageStatus(id, currentStatus, adminId, role) {
     try {
+      // Cek akses terlebih dahulu
+      if (role !== "superadmin") {
+        const [packages] = await db.query(
+          "SELECT admin_id FROM packages WHERE id = ?",
+          [id],
+        );
+
+        if (packages.length === 0) {
+          throw new Error("Package not found");
+        }
+
+        if (packages[0].admin_id !== adminId) {
+          throw new Error("Access denied to toggle this package status");
+        }
+      }
+
       const newStatus = currentStatus ? 0 : 1;
       const [result] = await db.query(
         "UPDATE packages SET is_active = ?, updated_at = NOW() WHERE id = ?",
@@ -649,6 +762,30 @@ class PackageService {
     } catch (error) {
       console.error("Error in PackageService.togglePackageStatus:", error);
       throw error;
+    }
+  }
+
+  // Cek apakah admin bisa mengakses package
+  static async canAccessPackage(packageId, adminId, role) {
+    try {
+      if (role === "superadmin") {
+        return true;
+      }
+
+      const [packages] = await db.query(
+        `SELECT id FROM packages 
+         WHERE id = ? 
+         AND (
+           admin_id = ? 
+           OR (is_shared = 1 AND JSON_CONTAINS(shared_with, CAST(? AS JSON)))
+         )`,
+        [packageId, adminId, JSON.stringify([adminId])],
+      );
+
+      return packages.length > 0;
+    } catch (error) {
+      console.error("Check package access error:", error);
+      return false;
     }
   }
 }

@@ -120,7 +120,7 @@ class CustomerReminderJob {
             this.whatsappSettings.reminderSchedule ||
             (process.env.NODE_ENV === "production"
               ? "0 9,15 * * *"
-              : "*/2 * * * *");
+              : "* 9 * * *");
 
           logger.info(`⏰ Scheduling customer reminder job: ${schedule}`);
           logger.info(`🌍 Timezone: Asia/Jakarta`);

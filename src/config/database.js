@@ -24,14 +24,14 @@ const pool = mysql.createPool({
   queueLimit: 0,
 });
 
-// Event listeners untuk monitoring
-pool.on("acquire", (connection) => {
-  console.log(`🔗 Connection ${connection.threadId} acquired`);
-});
+// // Event listeners untuk monitoring
+// pool.on("acquire", (connection) => {
+//   console.log(`🔗 Connection ${connection.threadId} acquired`);
+// });
 
-pool.on("release", (connection) => {
-  console.log(`🔓 Connection ${connection.threadId} released`);
-});
+// pool.on("release", (connection) => {
+//   console.log(`🔓 Connection ${connection.threadId} released`);
+// });
 
 pool.on("enqueue", () => {
   console.log("⏳ Query waiting for available connection...");

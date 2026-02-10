@@ -23,6 +23,8 @@ const customerReminderJob = require("./jobs/customerReminder");
 const notificationRoutes = require("./routes/notification.routes");
 const monitoringRoutes = require("./routes/monitoring.routes");
 const paymentLinkRoutes = require("./routes/paymentLink.routes");
+const adminManagementRoutes = require("./routes/adminManagement.routes");
+const trafficRoutes = require("./routes/traffic.routes");
 const testRoutes = require("./routes/test.routes");
 
 const app = express();
@@ -110,6 +112,8 @@ app.use("/api/customer-reminder", customerReminderRoutes);
 app.use("/api/notifications", notificationRoutes);
 app.use("/api/monitoring", monitoringRoutes);
 app.use("/api/payment-links", paymentLinkRoutes);
+app.use("/api/admin-management", adminManagementRoutes);
+app.use("/api/traffic", trafficRoutes);
 app.use("/api/test", testRoutes);
 
 if (process.env.NODE_ENV !== "test") {

@@ -1,25 +1,33 @@
 const PackageService = require("../services/package.service");
 
 class PackageController {
-  // List packages with filter (active/all)
+  // List packages with filter (active/all) dengan multi-user
   static async list(req, res) {
     try {
       const { all, page = 1, limit = 20, search } = req.query;
+      const adminId = req.user.id;
+      const role = req.user.role;
 
       console.log("📦 Package list request - Query:", {
         all,
         page,
         limit,
         search,
+        adminId,
+        role,
       });
 
       // Convert 'all' parameter to boolean
       const showInactive = all === "true";
 
-      // Use service to get packages
-      const packages = await PackageService.getAllPackages(showInactive);
+      // Use service to get packages dengan adminId dan role
+      const packages = await PackageService.getAllPackages(
+        showInactive,
+        adminId,
+        role,
+      );
 
-      console.log(`✅ Found ${packages.length} packages`);
+      console.log(`✅ Found ${packages.length} packages for admin ${adminId}`);
 
       res.json({
         success: true,
@@ -38,13 +46,14 @@ class PackageController {
     }
   }
 
-  // Create package
+  // Create package dengan admin_id
   static async create(req, res) {
     try {
       console.log("📦 Create package request:", req.body);
       console.log("👤 Admin:", req.user);
 
-      const adminId = req.user ? req.user.id : 1;
+      const adminId = req.user.id;
+      const role = req.user.role;
 
       // Validasi input wajib
       const { name, price, duration_days, selected_routers } = req.body;
@@ -71,7 +80,6 @@ class PackageController {
         });
       }
 
-      // 🔥 INI PERBAIKAN UTAMA: Sertakan selected_routers!
       // Siapkan data untuk service
       const packageData = {
         name,
@@ -87,15 +95,18 @@ class PackageController {
             .toLowerCase()
             .replace(/\s+/g, "_")
             .replace(/[^a-z0-9_]/g, ""),
-        selected_routers: selected_routers || [], // ⬅️ INI YANG HILANG!
+        selected_routers: selected_routers || [],
+        is_shared: req.body.is_shared || false,
+        shared_with: req.body.shared_with || [],
       };
 
       console.log("📦 Data being sent to service:", {
         ...packageData,
         selected_routers: packageData.selected_routers,
+        admin_id: adminId,
       });
 
-      // Panggil service untuk membuat package
+      // Panggil service untuk membuat package dengan adminId
       const result = await PackageService.createPackage(packageData, adminId);
 
       res.status(201).json({
@@ -131,18 +142,26 @@ class PackageController {
       });
     }
   }
-  // Get single package
+
+  // Get single package dengan authorization
   static async getById(req, res) {
     try {
       const { id } = req.params;
-      console.log("📦 Get package by ID:", id);
+      const adminId = req.user.id;
+      const role = req.user.role;
 
-      const packageData = await PackageService.getPackageById(id);
+      console.log("📦 Get package by ID:", id, "Admin:", adminId);
+
+      const packageData = await PackageService.getPackageById(
+        id,
+        adminId,
+        role,
+      );
 
       if (!packageData) {
         return res.status(404).json({
           success: false,
-          message: "Package not found",
+          message: "Package not found or access denied",
         });
       }
 
@@ -159,16 +178,33 @@ class PackageController {
     }
   }
 
-  // Update package
+  // Update package dengan authorization
   static async update(req, res) {
     try {
       const { id } = req.params;
-      const adminId = req.user ? req.user.id : 1;
+      const adminId = req.user.id;
+      const role = req.user.role;
+
+      console.log(`✏️ Update package request for ID: ${id}, Admin: ${adminId}`);
+
+      // Cek akses terlebih dahulu
+      const canAccess = await PackageService.canAccessPackage(
+        id,
+        adminId,
+        role,
+      );
+      if (!canAccess) {
+        return res.status(403).json({
+          success: false,
+          message: "Access denied to update this package",
+        });
+      }
 
       const updatedPackage = await PackageService.updatePackage(
         id,
         req.body,
         adminId,
+        role,
       );
 
       res.json({
@@ -178,6 +214,17 @@ class PackageController {
       });
     } catch (error) {
       console.error("Error updating package:", error);
+
+      if (
+        error.message.includes("not found") ||
+        error.message.includes("access denied")
+      ) {
+        return res.status(404).json({
+          success: false,
+          message: "Package not found or access denied",
+        });
+      }
+
       res.status(500).json({
         success: false,
         message: error.message || "Gagal memperbarui paket",
@@ -185,15 +232,31 @@ class PackageController {
     }
   }
 
-  // Delete package
+  // Delete package dengan authorization
   static async delete(req, res) {
     try {
       const { id } = req.params;
-      const adminId = req.user ? req.user.id : 1;
+      const adminId = req.user.id;
+      const role = req.user.role;
 
-      console.log(`🗑️ Delete package request for ID: ${id}`);
+      console.log(
+        `🗑️ Delete package request for ID: ${id}, Admin: ${adminId}, Role: ${role}`,
+      );
 
-      const result = await PackageService.deletePackage(id, adminId);
+      // Cek akses terlebih dahulu
+      const canAccess = await PackageService.canAccessPackage(
+        id,
+        adminId,
+        role,
+      );
+      if (!canAccess) {
+        return res.status(403).json({
+          success: false,
+          message: "Access denied to delete this package",
+        });
+      }
+
+      const result = await PackageService.deletePackage(id, adminId, role);
 
       if (result.success) {
         res.json({
@@ -215,9 +278,12 @@ class PackageController {
       let statusCode = 500;
       let errorMessage = "Failed to delete package";
 
-      if (error.message.includes("Package not found")) {
+      if (
+        error.message.includes("Package not found") ||
+        error.message.includes("access denied")
+      ) {
         statusCode = 404;
-        errorMessage = error.message;
+        errorMessage = "Package not found or access denied";
       }
 
       res.status(statusCode).json({
@@ -225,6 +291,100 @@ class PackageController {
         message: errorMessage,
         error:
           process.env.NODE_ENV === "development" ? error.message : undefined,
+      });
+    }
+  }
+
+  // Share package dengan admin lain
+  static async sharePackage(req, res) {
+    try {
+      const { id } = req.params;
+      const { admin_ids } = req.body;
+      const adminId = req.user.id;
+      const role = req.user.role;
+
+      if (!Array.isArray(admin_ids)) {
+        return res.status(400).json({
+          success: false,
+          message: "admin_ids harus berupa array",
+        });
+      }
+
+      // Hanya superadmin atau pemilik package yang bisa share
+      if (role !== "superadmin") {
+        // Cek apakah package milik admin ini
+        const db = require("../config/database");
+        const [packages] = await db.query(
+          "SELECT admin_id FROM packages WHERE id = ?",
+          [id],
+        );
+
+        if (packages.length === 0) {
+          return res.status(404).json({
+            success: false,
+            message: "Package not found",
+          });
+        }
+
+        if (packages[0].admin_id !== adminId) {
+          return res.status(403).json({
+            success: false,
+            message: "You can only share your own packages",
+          });
+        }
+      }
+
+      // Filter out current admin
+      const filteredAdminIds = admin_ids.filter(
+        (targetId) => targetId !== adminId,
+      );
+
+      // Update sharing
+      const isShared = filteredAdminIds.length > 0;
+      const sharedWithJson = isShared ? JSON.stringify(filteredAdminIds) : null;
+
+      await db.query(
+        `UPDATE packages 
+         SET is_shared = ?, shared_with = ?, updated_at = NOW() 
+         WHERE id = ?`,
+        [isShared ? 1 : 0, sharedWithJson, id],
+      );
+
+      res.json({
+        success: true,
+        message: "Package shared successfully",
+        data: {
+          package_id: id,
+          is_shared: isShared,
+          shared_with: filteredAdminIds,
+        },
+      });
+    } catch (error) {
+      console.error("Share package error:", error);
+      res.status(500).json({
+        success: false,
+        message: error.message,
+      });
+    }
+  }
+
+  // Get active packages untuk customer selection dengan filter multi-user
+  static async getActivePackages(req, res) {
+    try {
+      const adminId = req.user.id;
+      const role = req.user.role;
+
+      const packages = await PackageService.getActivePackages(adminId, role);
+
+      res.json({
+        success: true,
+        data: packages,
+      });
+    } catch (error) {
+      console.error("Error getting active packages:", error);
+      res.status(500).json({
+        success: false,
+        message: error.message,
       });
     }
   }

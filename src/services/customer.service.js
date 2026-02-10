@@ -1,11 +1,12 @@
 const db = require("../config/database");
+const Customer = require("../models/Customer");
 const MikrotikService = require("./mikrotik.service");
 const logger = require("../utils/logger");
 const SuspensionService = require("./suspension.service");
 
 class CustomerService {
-  // CREATE CUSTOMER
-  static async createCustomer(data, adminId) {
+  // CREATE CUSTOMER dengan admin_id
+  static async createCustomer(data, adminId, role) {
     const connection = await db.getConnection();
 
     try {
@@ -17,6 +18,7 @@ class CustomerService {
         router_id: data.router_id,
         package_id: data.package_id,
         adminId,
+        role,
       });
 
       // 1. Validasi username
@@ -72,7 +74,7 @@ class CustomerService {
         `🔧 Creating customer: ${data.username_pppoe}, expires: ${expiredAtStr}`,
       );
 
-      // ✅ PERBAIKAN: TEST MIKROTIK CONNECTION DENGAN SIMPLE METHOD
+      // 6. Test MikroTik connection
       let mikrotik;
       try {
         mikrotik = new MikrotikService({
@@ -82,7 +84,6 @@ class CustomerService {
           api_port: router.api_port || 8728,
         });
 
-        // Gunakan simple test untuk UI
         const testResult = await mikrotik.simpleTestConnection();
 
         if (!testResult.success) {
@@ -98,7 +99,6 @@ class CustomerService {
           mikrotikError.message,
         );
 
-        // Log error
         await connection.query(
           `INSERT INTO logs (action, entity, entity_id, description, source, admin_id) 
          VALUES (?, ?, ?, ?, ?, ?)`,
@@ -120,11 +120,13 @@ class CustomerService {
         );
       }
 
-      // 6. Create customer in database FIRST
+      // 7. Create customer in database WITH ADMIN_ID
       const [customerResult] = await connection.query(
         `INSERT INTO customers 
-       (name, phone, address, username_pppoe, password_pppoe, router_id, package_id, expired_at, status, auto_renew) 
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       (name, phone, address, username_pppoe, password_pppoe, 
+        router_id, package_id, expired_at, status, auto_renew,
+        admin_id, is_shared, shared_with) 
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           data.name,
           data.phone || null,
@@ -136,20 +138,23 @@ class CustomerService {
           expiredAtStr,
           data.status || "active",
           data.auto_renew !== undefined ? data.auto_renew : 1,
+          adminId, // Admin ID dari user yang login
+          data.is_shared || 0,
+          data.shared_with ? JSON.stringify(data.shared_with) : null,
         ],
       );
 
       const customerId = customerResult.insertId;
 
-      // 7. Create subscription record
+      // 8. Create subscription record
       await connection.query(
         `INSERT INTO subscriptions 
-       (customer_id, package_id, start_date, expired_at, status) 
-       VALUES (?, ?, CURDATE(), ?, 'active')`,
-        [customerId, data.package_id, expiredAtStr],
+       (customer_id, package_id, start_date, expired_at, status, admin_id) 
+       VALUES (?, ?, CURDATE(), ?, 'active', ?)`,
+        [customerId, data.package_id, expiredAtStr, adminId],
       );
 
-      // 8. ✅ CREATE PPPOE USER DI MIKROTIK (setelah database commit)
+      // 9. Create PPPoE user di MikroTik
       try {
         const profileName =
           pkg.profile_name || pkg.name.toLowerCase().replace(/\s+/g, "_");
@@ -169,7 +174,6 @@ class CustomerService {
           `✅ MikroTik user created successfully for customer ${customerId}`,
         );
 
-        // Log success
         await connection.query(
           `INSERT INTO logs (action, entity, entity_id, description, source, admin_id) 
          VALUES (?, ?, ?, ?, ?, ?)`,
@@ -187,7 +191,6 @@ class CustomerService {
           `❌ Failed to create PPPoE user: ${mikrotikCreateError.message}`,
         );
 
-        // Log error but DON'T rollback - customer sudah dibuat di database
         await connection.query(
           `INSERT INTO logs (action, entity, entity_id, description, source, admin_id) 
          VALUES (?, ?, ?, ?, ?, ?)`,
@@ -201,7 +204,6 @@ class CustomerService {
           ],
         );
 
-        // Set flag bahwa user perlu dibuat manual di MikroTik
         await connection.query(
           `UPDATE customers SET mikrotik_status = 'pending' WHERE id = ?`,
           [customerId],
@@ -212,7 +214,7 @@ class CustomerService {
         );
       }
 
-      // 9. Create invoice
+      // 10. Create invoice dengan admin_id
       try {
         const invoiceNumber = `INV-${Date.now()}-${Math.random()
           .toString(36)
@@ -220,8 +222,8 @@ class CustomerService {
 
         await connection.query(
           `INSERT INTO invoices 
-         (invoice_number, customer_id, amount, description, status, issue_date, due_date) 
-         VALUES (?, ?, ?, ?, ?, CURDATE(), ?)`,
+         (invoice_number, customer_id, amount, description, status, issue_date, due_date, admin_id) 
+         VALUES (?, ?, ?, ?, ?, CURDATE(), ?, ?)`,
           [
             invoiceNumber,
             customerId,
@@ -229,16 +231,16 @@ class CustomerService {
             `Invoice untuk paket ${pkg.name}`,
             "pending",
             expiredAtStr,
+            adminId,
           ],
         );
 
         console.log(`✅ Invoice created for customer ${customerId}`);
       } catch (invoiceError) {
         console.warn(`⚠️ Invoice creation failed: ${invoiceError.message}`);
-        // Jangan gagal keseluruhan jika invoice gagal
       }
 
-      // 10. Log activity
+      // 11. Log activity
       await connection.query(
         `INSERT INTO logs (action, entity, entity_id, description, source, admin_id) 
        VALUES (?, ?, ?, ?, ?, ?)`,
@@ -265,9 +267,11 @@ class CustomerService {
         router: router.name,
         auto_renew: data.auto_renew !== undefined ? data.auto_renew : 1,
         mikrotik_status: "created",
+        admin_id: adminId,
+        is_shared: data.is_shared || 0,
+        shared_with: data.shared_with || [],
       };
     } catch (error) {
-      // Rollback jika ada error SEBELUM customer dibuat
       if (connection && connection.rollback) {
         try {
           await connection.rollback();
@@ -289,478 +293,65 @@ class CustomerService {
     }
   }
 
-  // Get all customers with pagination - TETAP SAMA
-  static async getCustomers(page = 1, limit = 20, filters = {}) {
+  // Get all customers dengan pagination dan filter multi-user
+  static async getCustomers(
+    page = 1,
+    limit = 20,
+    filters = {},
+    adminId = null,
+    role = null,
+  ) {
     try {
-      const offset = (page - 1) * limit;
-
-      let whereClause = "WHERE 1=1";
-      const params = [];
-
-      if (filters.status) {
-        whereClause += " AND c.status = ?";
-        params.push(filters.status);
-      }
-
-      if (filters.router_id) {
-        whereClause += " AND c.router_id = ?";
-        params.push(filters.router_id);
-      }
-
-      if (filters.search) {
-        whereClause +=
-          " AND (c.name LIKE ? OR c.username_pppoe LIKE ? OR c.phone LIKE ?)";
-        const searchTerm = `%${filters.search}%`;
-        params.push(searchTerm, searchTerm, searchTerm);
-      }
-
-      // Get customers
-      const [customers] = await db.query(
-        `SELECT 
-        c.*,
-        r.name as router_name,
-        p.name as package_name,
-        p.duration_days,
-        p.price,
-        DATE_FORMAT(c.expired_at, '%Y-%m-%d') as expired_at,
-        DATEDIFF(c.expired_at, CURDATE()) as days_remaining
-       FROM customers c
-       JOIN routers r ON c.router_id = r.id
-       JOIN packages p ON c.package_id = p.id
-       ${whereClause}
-       ORDER BY c.created_at DESC
-       LIMIT ? OFFSET ?`,
-        [...params, parseInt(limit), parseInt(offset)],
+      // Gunakan method dari model Customer yang sudah diupdate
+      return await Customer.getCustomersWithPagination(
+        page,
+        limit,
+        filters,
+        adminId,
+        role,
       );
-
-      // Get total count
-      const [[{ total }]] = await db.query(
-        `SELECT COUNT(*) as total FROM customers c ${whereClause}`,
-        params,
-      );
-
-      return {
-        data: customers,
-        pagination: {
-          page: parseInt(page),
-          limit: parseInt(limit),
-          total,
-          pages: Math.ceil(total / limit),
-        },
-      };
     } catch (error) {
       logger.error("Get customers error:", error);
       throw error;
     }
   }
 
-  // Update customer - TAMBAH VALIDASI UNIQUENESS USERNAME
-  static async updateCustomer(id, data, adminId) {
-    const connection = await db.getConnection();
-
+  // Get customer by ID dengan authorization
+  static async getCustomerById(id, adminId = null, role = null) {
     try {
-      await connection.beginTransaction();
-
-      console.log(`🔍 Updating customer ID: ${id}`, data);
-
-      // Check if customer exists
-      const [customers] = await connection.query(
-        `SELECT c.*, r.* FROM customers c 
-       JOIN routers r ON c.router_id = r.id 
-       WHERE c.id = ?`,
-        [id],
-      );
-
-      if (customers.length === 0) {
-        throw new Error("Customer not found");
-      }
-
-      const customer = customers[0];
-
-      // Validasi: Cek apakah username baru sudah digunakan oleh customer lain
-      if (
-        data.username_pppoe &&
-        data.username_pppoe !== customer.username_pppoe
-      ) {
-        const [existing] = await connection.query(
-          "SELECT id FROM customers WHERE username_pppoe = ? AND id != ?",
-          [data.username_pppoe, id],
-        );
-
-        if (existing.length > 0) {
-          throw new Error(
-            `Username "${data.username_pppoe}" sudah digunakan oleh customer lain`,
-          );
-        }
-      }
-
-      // Build update fields
-      const updateFields = [];
-      const updateValues = [];
-
-      // Field yang selalu diupdate
-      const fieldsToUpdate = [
-        { name: "name", value: data.name },
-        { name: "phone", value: data.phone },
-        { name: "address", value: data.address },
-        { name: "router_id", value: data.router_id },
-        { name: "package_id", value: data.package_id },
-        { name: "auto_renew", value: data.auto_renew },
-        { name: "status", value: data.status },
-      ];
-
-      fieldsToUpdate.forEach((field) => {
-        if (data[field.name] !== undefined) {
-          updateFields.push(`${field.name} = ?`);
-          updateValues.push(
-            field.name === "phone" && data[field.name] === null
-              ? null
-              : field.value,
-          );
-        }
-      });
-
-      // Handle expired_at
-      if (data.expired_at !== undefined) {
-        let expiredDate = data.expired_at;
-        if (typeof expiredDate === "string" && expiredDate.includes("T")) {
-          expiredDate = expiredDate.split("T")[0];
-        }
-        updateFields.push("expired_at = ?");
-        updateValues.push(expiredDate);
-      }
-
-      // Handle username_pppoe jika berbeda
-      if (
-        data.username_pppoe &&
-        data.username_pppoe !== customer.username_pppoe
-      ) {
-        updateFields.push("username_pppoe = ?");
-        updateValues.push(data.username_pppoe);
-
-        // Update username di MikroTik jika ada perubahan
-        try {
-          const mikrotik = new MikrotikService(customer);
-          await mikrotik.updatePPPoEUsername(
-            customer.username_pppoe,
-            data.username_pppoe,
-          );
-          console.log(
-            `✅ MikroTik username updated: ${customer.username_pppoe} -> ${data.username_pppoe}`,
-          );
-        } catch (mikrotikError) {
-          console.error(
-            `❌ MikroTik username update failed:`,
-            mikrotikError.message,
-          );
-          await connection.query(
-            `INSERT INTO logs (action, entity, entity_id, description, source, admin_id) 
-           VALUES (?, ?, ?, ?, ?, ?)`,
-            [
-              "mikrotik_error",
-              "customer",
-              id,
-              `MikroTik username update failed: ${mikrotikError.message}`,
-              "system",
-              adminId,
-            ],
-          );
-        }
-      }
-
-      // Handle password_pppoe jika diberikan
-      if (data.password_pppoe && data.password_pppoe.trim() !== "") {
-        updateFields.push("password_pppoe = ?");
-        updateValues.push(data.password_pppoe);
-
-        // Update password di MikroTik
-        try {
-          const mikrotik = new MikrotikService(customer);
-          const usernameToUpdate =
-            data.username_pppoe || customer.username_pppoe;
-          await mikrotik.updatePPPoEPassword(
-            usernameToUpdate,
-            data.password_pppoe,
-          );
-          console.log(
-            `✅ MikroTik password updated for user: ${usernameToUpdate}`,
-          );
-        } catch (mikrotikError) {
-          console.error(
-            `❌ MikroTik password update failed:`,
-            mikrotikError.message,
-          );
-          await connection.query(
-            `INSERT INTO logs (action, entity, entity_id, description, source, admin_id) 
-           VALUES (?, ?, ?, ?, ?, ?)`,
-            [
-              "mikrotik_error",
-              "customer",
-              id,
-              `MikroTik password update failed: ${mikrotikError.message}`,
-              "system",
-              adminId,
-            ],
-          );
-        }
-      }
-
-      // Tambah updated_at
-      updateFields.push("updated_at = NOW()");
-
-      // Eksekusi update jika ada perubahan
-      if (updateFields.length > 0) {
-        updateValues.push(id);
-
-        const updateQuery = `UPDATE customers SET ${updateFields.join(
-          ", ",
-        )} WHERE id = ?`;
-        await connection.query(updateQuery, updateValues);
-      }
-
-      // Log activity
-      await connection.query(
-        `INSERT INTO logs (action, entity, entity_id, description, source, admin_id) 
-       VALUES (?, ?, ?, ?, ?, ?)`,
-        [
-          "update_customer",
-          "customer",
-          id,
-          `Customer updated: ${data.name} (${
-            data.username_pppoe || customer.username_pppoe
-          })`,
-          "admin",
-          adminId,
-        ],
-      );
-
-      await connection.commit();
-
-      // Return updated customer data
-      const [updatedCustomers] = await connection.query(
-        `SELECT 
-        c.*,
-        r.name as router_name,
-        p.name as package_name
-       FROM customers c
-       JOIN routers r ON c.router_id = r.id
-       JOIN packages p ON c.package_id = p.id
-       WHERE c.id = ?`,
-        [id],
-      );
-
-      return updatedCustomers[0];
+      return await Customer.getCustomerById(id, adminId, role);
     } catch (error) {
-      await connection.rollback();
-      console.error(`❌ Update customer error:`, error);
-      throw error;
-    } finally {
-      connection.release();
-    }
-  }
-
-  // Get statistics - TAMBAH STATISTIK UNTUK DEBUG
-  static async getStatistics() {
-    try {
-      const [stats] = await db.query(`
-        SELECT 
-          (SELECT COUNT(*) FROM customers) as total_customers,
-          (SELECT COUNT(*) FROM customers WHERE status = 'active') as active_customers,
-          (SELECT COUNT(*) FROM customers WHERE status = 'expired') as expired_customers,
-          (SELECT COUNT(*) FROM customers WHERE status = 'suspended') as suspended_customers,
-          (SELECT COUNT(*) FROM customers WHERE DATEDIFF(expired_at, CURDATE()) <= 3 AND status = 'active') as expiring_soon,
-          (SELECT COUNT(*) FROM customers WHERE username_pppoe LIKE 'CUST%') as auto_generated_users,
-          (SELECT COUNT(*) FROM customers WHERE username_pppoe NOT LIKE 'CUST%') as manual_users,
-          (SELECT SUM(price) FROM packages p JOIN customers c ON p.id = c.package_id WHERE c.status = 'active') as monthly_revenue
-      `);
-
-      return stats[0];
-    } catch (error) {
-      logger.error("Get statistics error:", error);
+      logger.error("Get customer by ID error:", error);
       throw error;
     }
   }
 
-  // Delete customer - FUNGSI INI HILANG, TAMBAHKAN KEMBALI
-  // Delete customer - ONLY FOR DEVELOPMENT/TESTING
-  static async deleteCustomer(id, adminId) {
-    // Production safety check
-    const isProduction = process.env.NODE_ENV === "production";
-    const userRole = adminId.role || "admin"; // Assume adminId contains role info
-
-    if (isProduction && userRole !== "superadmin") {
-      throw new Error(
-        "Customer deletion is not allowed in production environment",
-      );
-    }
-
-    const connection = await db.getConnection();
-
+  // Update customer dengan authorization
+  static async updateCustomer(id, data, adminId, role) {
     try {
-      await connection.beginTransaction();
-
-      console.log(
-        `🔍 Attempting to delete customer ID: ${id} - ENV: ${process.env.NODE_ENV}`,
-      );
-
-      // 1. Get customer data
-      const [customers] = await connection.query(
-        `SELECT c.*, r.* FROM customers c 
-       LEFT JOIN routers r ON c.router_id = r.id 
-       WHERE c.id = ?`,
-        [id],
-      );
-
-      if (customers.length === 0) {
-        throw new Error("Customer not found");
-      }
-
-      const customer = customers[0];
-
-      // 2. STRICT VALIDATION for production
-      if (isProduction) {
-        // Check if customer has any payments
-        const [payments] = await connection.query(
-          `SELECT COUNT(p.id) as payment_count 
-         FROM invoices i 
-         LEFT JOIN payments p ON i.id = p.invoice_id 
-         WHERE i.customer_id = ?`,
-          [id],
-        );
-
-        if (payments[0].payment_count > 0) {
-          throw new Error(
-            `Cannot delete customer with payment history. ` +
-              `Customer has ${payments[0].payment_count} payment record(s). ` +
-              `Use deactivate instead.`,
-          );
-        }
-
-        // Check if customer is recent (less than 24 hours old)
-        const [customerAge] = await connection.query(
-          `SELECT TIMESTAMPDIFF(HOUR, created_at, NOW()) as hours_old 
-         FROM customers WHERE id = ?`,
-          [id],
-        );
-
-        if (customerAge[0].hours_old > 24) {
-          throw new Error(
-            `Cannot delete customer older than 24 hours in production. ` +
-              `Customer is ${customerAge[0].hours_old} hours old. ` +
-              `Use deactivate instead.`,
-          );
-        }
-      }
-
-      // 3. Check for existing invoices
-      const [invoices] = await connection.query(
-        "SELECT id FROM invoices WHERE customer_id = ?",
-        [id],
-      );
-
-      const invoiceIds = invoices.map((inv) => inv.id);
-
-      if (invoiceIds.length > 0) {
-        console.log(`📄 Found ${invoiceIds.length} invoices for this customer`);
-
-        // Delete payments related to these invoices
-        if (invoiceIds.length > 0) {
-          await connection.query(
-            "DELETE FROM payments WHERE invoice_id IN (?)",
-            [invoiceIds],
-          );
-          console.log(`✅ Deleted payments for ${invoiceIds.length} invoices`);
-        }
-
-        // Delete invoices
-        await connection.query("DELETE FROM invoices WHERE customer_id = ?", [
-          id,
-        ]);
-        console.log(`✅ Deleted ${invoiceIds.length} invoices`);
-      }
-
-      // 4. Delete subscriptions
-      await connection.query(
-        "DELETE FROM subscriptions WHERE customer_id = ?",
-        [id],
-      );
-      console.log(`✅ Subscriptions deleted`);
-
-      // 5. Remove from MikroTik (optional - only if exists)
-      if (customer.ip_address && customer.username_pppoe) {
-        try {
-          const mikrotik = new MikrotikService({
-            ip_address: customer.ip_address,
-            username: customer.username,
-            password: customer.password,
-            port: customer.port || 8728,
-          });
-
-          // Check if user exists before removing
-          const userExists = await mikrotik.checkPPPoEUserExists(
-            customer.username_pppoe,
-          );
-          if (userExists) {
-            await mikrotik.removePPPoEUser(customer.username_pppoe);
-            console.log(`✅ MikroTik user removed: ${customer.username_pppoe}`);
-          } else {
-            console.log(`ℹ️ MikroTik user not found, skipping removal`);
-          }
-        } catch (mikrotikError) {
-          console.warn(`⚠️ MikroTik removal failed: ${mikrotikError.message}`);
-          // Don't fail if MikroTik fails
-        }
-      }
-
-      // 6. Delete customer from database
-      await connection.query("DELETE FROM customers WHERE id = ?", [id]);
-      console.log(`✅ Customer deleted from database`);
-
-      // 7. Log activity with environment info
-      await connection.query(
-        `INSERT INTO logs (action, entity, entity_id, description, source, admin_id, created_at) 
-       VALUES (?, ?, ?, ?, ?, ?, NOW())`,
-        [
-          "delete_customer",
-          "customer",
-          id,
-          `Customer PERMANENTLY deleted: ${customer.name} (${customer.username_pppoe}) - ENV: ${process.env.NODE_ENV}`,
-          "admin",
-          adminId,
-        ],
-      );
-
-      await connection.commit();
-      console.log(`🎉 Customer delete transaction committed`);
-
-      return {
-        success: true,
-        message: "Customer deleted successfully",
-        warning: isProduction
-          ? "Production environment - audit trail preserved"
-          : "Development environment",
-        deleted_customer: {
-          id: id,
-          name: customer.name,
-          username: customer.username_pppoe,
-          environment: process.env.NODE_ENV,
-        },
-      };
+      // Gunakan method dari model Customer
+      return await Customer.updateCustomer(id, data, adminId, role);
     } catch (error) {
-      await connection.rollback();
-      console.error(`❌ Delete customer error:`, error);
+      logger.error("Update customer error:", error);
       throw error;
-    } finally {
-      if (connection && connection.release) {
-        connection.release();
-      }
     }
   }
 
-  // Deactivate customer (set status to 'inactive' and disable PPPoE)
+  // Delete customer dengan authorization
+  static async deleteCustomer(id, adminId, role) {
+    try {
+      return await Customer.deleteCustomer(id, adminId, role);
+    } catch (error) {
+      logger.error("Delete customer error:", error);
+      throw error;
+    }
+  }
+
+  // Deactivate customer
   static async deactivateCustomer(
     customerId,
     adminId,
+    role,
     reason = "Deactivated by admin",
   ) {
     const connection = await db.getConnection();
@@ -770,17 +361,15 @@ class CustomerService {
 
       console.log(`🚫 Deactivating customer ID: ${customerId}`);
 
-      // 1. Check if customer exists
-      const [customers] = await connection.query(
-        "SELECT c.*, r.* FROM customers c JOIN routers r ON c.router_id = r.id WHERE c.id = ?",
-        [customerId],
+      // 1. Cek akses terlebih dahulu
+      const customer = await Customer.getCustomerById(
+        customerId,
+        adminId,
+        role,
       );
-
-      if (customers.length === 0) {
-        throw new Error("Customer not found");
+      if (!customer) {
+        throw new Error("Customer not found or access denied");
       }
-
-      const customer = customers[0];
 
       // 2. Check if customer has pending invoices
       const [pendingInvoices] = await connection.query(
@@ -795,7 +384,7 @@ class CustomerService {
         );
       }
 
-      // 3. Update status to 'inactive' (need to update ENUM first)
+      // 3. Update status to 'inactive'
       await connection.query(
         "UPDATE customers SET status = 'inactive', updated_at = NOW() WHERE id = ?",
         [customerId],
@@ -803,22 +392,29 @@ class CustomerService {
 
       // 4. Disable PPPoE user in MikroTik
       try {
-        const mikrotik = new MikrotikService({
-          ip_address: customer.ip_address,
-          username: customer.username,
-          password: customer.password,
-          port: customer.port || 8728,
-        });
+        const [routers] = await connection.query(
+          "SELECT * FROM routers WHERE id = ?",
+          [customer.router_id],
+        );
 
-        await mikrotik.disablePPPoEUser(customer.username_pppoe);
-        console.log(`✅ PPPoE user disabled on router: ${customer.name}`);
+        if (routers.length > 0) {
+          const router = routers[0];
+          const mikrotik = new MikrotikService({
+            ip_address: router.ip_address,
+            username: router.username,
+            password: router.password,
+            port: router.port || 8728,
+          });
+
+          await mikrotik.disablePPPoEUser(customer.username_pppoe);
+          console.log(`✅ PPPoE user disabled on router: ${router.name}`);
+        }
       } catch (mikrotikError) {
         console.error(
           `⚠️ Failed to disable PPPoE user:`,
           mikrotikError.message,
         );
 
-        // Log error but don't fail the whole operation
         await connection.query(
           `INSERT INTO logs (action, entity, entity_id, description, source, admin_id, created_at) 
          VALUES (?, ?, ?, ?, ?, ?, NOW())`,
@@ -883,8 +479,8 @@ class CustomerService {
     }
   }
 
-  // Activate customer (set status to 'active' and enable PPPoE)
-  static async activateCustomer(customerId, adminId) {
+  // Activate customer
+  static async activateCustomer(customerId, adminId, role) {
     const connection = await db.getConnection();
 
     try {
@@ -892,17 +488,15 @@ class CustomerService {
 
       console.log(`✅ Activating customer ID: ${customerId}`);
 
-      // 1. Check if customer exists
-      const [customers] = await connection.query(
-        "SELECT c.*, r.* FROM customers c JOIN routers r ON c.router_id = r.id WHERE c.id = ?",
-        [customerId],
+      // 1. Cek akses terlebih dahulu
+      const customer = await Customer.getCustomerById(
+        customerId,
+        adminId,
+        role,
       );
-
-      if (customers.length === 0) {
-        throw new Error("Customer not found");
+      if (!customer) {
+        throw new Error("Customer not found or access denied");
       }
-
-      const customer = customers[0];
 
       // 2. Update status to 'active'
       await connection.query(
@@ -912,19 +506,26 @@ class CustomerService {
 
       // 3. Enable PPPoE user in MikroTik
       try {
-        const mikrotik = new MikrotikService({
-          ip_address: customer.ip_address,
-          username: customer.username,
-          password: customer.password,
-          port: customer.port || 8728,
-        });
+        const [routers] = await connection.query(
+          "SELECT * FROM routers WHERE id = ?",
+          [customer.router_id],
+        );
 
-        await mikrotik.enablePPPoEUser(customer.username_pppoe);
-        console.log(`✅ PPPoE user enabled on router: ${customer.name}`);
+        if (routers.length > 0) {
+          const router = routers[0];
+          const mikrotik = new MikrotikService({
+            ip_address: router.ip_address,
+            username: router.username,
+            password: router.password,
+            port: router.port || 8728,
+          });
+
+          await mikrotik.enablePPPoEUser(customer.username_pppoe);
+          console.log(`✅ PPPoE user enabled on router: ${router.name}`);
+        }
       } catch (mikrotikError) {
         console.error(`⚠️ Failed to enable PPPoE user:`, mikrotikError.message);
 
-        // Log error but don't fail the whole operation
         await connection.query(
           `INSERT INTO logs (action, entity, entity_id, description, source, admin_id, created_at) 
          VALUES (?, ?, ?, ?, ?, ?, NOW())`,
@@ -998,48 +599,180 @@ class CustomerService {
     }
   }
 
-  // Suspend customer (integrated with MikroTik)
+  // Share customer dengan admin lain
+  static async shareCustomer(customerId, adminId, role, targetAdminIds) {
+    try {
+      // Hanya pemilik yang bisa share
+      const customer = await Customer.getCustomerById(
+        customerId,
+        adminId,
+        role,
+      );
+
+      if (!customer || customer.admin_id !== adminId) {
+        throw new Error("You can only share customers that you own");
+      }
+
+      // Panggil method dari model Customer
+      return await Customer.shareCustomer(customerId, adminId, targetAdminIds);
+    } catch (error) {
+      logger.error("Share customer error:", error);
+      throw error;
+    }
+  }
+
+  // Get statistics dengan filter multi-user
+  static async getStatistics(adminId = null, role = null) {
+    try {
+      return await Customer.getStatistics(adminId, role);
+    } catch (error) {
+      logger.error("Get statistics error:", error);
+      throw error;
+    }
+  }
+
+  // Extend customer package
+  static async extendCustomer(customerId, days, adminId, role) {
+    try {
+      // Cek akses terlebih dahulu
+      const customer = await Customer.getCustomerById(
+        customerId,
+        adminId,
+        role,
+      );
+      if (!customer) {
+        throw new Error("Customer not found or access denied");
+      }
+
+      if (days && days <= 0) {
+        throw new Error("Days must be greater than 0");
+      }
+
+      const connection = await db.getConnection();
+
+      try {
+        await connection.beginTransaction();
+
+        // Calculate new expiration date
+        const currentExpiredAt = new Date(customer.expired_at);
+        const newExpiredAt = new Date(currentExpiredAt);
+        newExpiredAt.setDate(newExpiredAt.getDate() + days);
+
+        // Update customer
+        await connection.query(
+          "UPDATE customers SET expired_at = ?, updated_at = NOW() WHERE id = ?",
+          [newExpiredAt.toISOString().split("T")[0], customerId],
+        );
+
+        // Update subscription
+        await connection.query(
+          "UPDATE subscriptions SET expired_at = ? WHERE customer_id = ?",
+          [newExpiredAt.toISOString().split("T")[0], customerId],
+        );
+
+        // Log activity
+        await connection.query(
+          `INSERT INTO logs (action, entity, entity_id, description, source, admin_id) 
+           VALUES (?, ?, ?, ?, ?, ?)`,
+          [
+            "extend_customer",
+            "customer",
+            customerId,
+            `Customer extended by ${days} days, new expiry: ${newExpiredAt.toISOString().split("T")[0]}`,
+            "admin",
+            adminId,
+          ],
+        );
+
+        await connection.commit();
+
+        return {
+          success: true,
+          customer_id: customerId,
+          old_expired_at: customer.expired_at,
+          new_expired_at: newExpiredAt.toISOString().split("T")[0],
+          days_added: days,
+        };
+      } catch (error) {
+        await connection.rollback();
+        throw error;
+      } finally {
+        if (connection && connection.release) {
+          connection.release();
+        }
+      }
+    } catch (error) {
+      logger.error("Extend customer error:", error);
+      throw error;
+    }
+  }
+
+  // Suspend customer
   static async suspendCustomer(
     customerId,
     adminId,
+    role,
     reason = "Manual suspension",
   ) {
-    return await SuspensionService.suspendCustomer(customerId, adminId, reason);
+    try {
+      // Cek akses terlebih dahulu
+      const customer = await Customer.getCustomerById(
+        customerId,
+        adminId,
+        role,
+      );
+      if (!customer) {
+        throw new Error("Customer not found or access denied");
+      }
+
+      return await SuspensionService.suspendCustomer(
+        customerId,
+        adminId,
+        reason,
+      );
+    } catch (error) {
+      logger.error("Suspend customer error:", error);
+      throw error;
+    }
   }
 
-  // // Activate/reactivate customer (integrated with MikroTik)
-  // static async activateCustomer(
-  //   customerId,
-  //   adminId,
-  //   reason = "Manual activation"
-  // ) {
-  //   return await SuspensionService.reactivateCustomer(
-  //     customerId,
-  //     adminId,
-  //     reason
-  //   );
-  // }
+  // Reactivate customer dari suspension
+  static async reactivateCustomer(
+    customerId,
+    adminId,
+    role,
+    reason = "Manual activation",
+  ) {
+    try {
+      // Cek akses terlebih dahulu
+      const customer = await Customer.getCustomerById(
+        customerId,
+        adminId,
+        role,
+      );
+      if (!customer) {
+        throw new Error("Customer not found or access denied");
+      }
 
-  // Update customer expired_at dan status jika expired
-  static async updateCustomerExpiry(customerId, expiredAt) {
-    const customer = await Customer.findByPk(customerId);
-
-    if (!customer) {
-      throw new Error("Customer not found");
+      return await SuspensionService.reactivateCustomer(
+        customerId,
+        adminId,
+        reason,
+      );
+    } catch (error) {
+      logger.error("Reactivate customer error:", error);
+      throw error;
     }
+  }
 
-    const today = new Date();
-    const newExpiredDate = new Date(expiredAt);
-
-    // Update expired_at
-    await customer.update({ expired_at: newExpiredDate });
-
-    // Jika expired_at sudah lewat, update status ke expired
-    if (newExpiredDate < today && customer.status === "active") {
-      await customer.update({ status: "expired" });
+  // Get recent customers for dashboard
+  static async getRecentCustomers(adminId, limit = 10) {
+    try {
+      return await Customer.getCustomersByAdmin(adminId, limit);
+    } catch (error) {
+      logger.error("Get recent customers error:", error);
+      throw error;
     }
-
-    return customer;
   }
 }
 

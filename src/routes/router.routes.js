@@ -22,21 +22,21 @@ router.get("/:id/test", RouterController.testConnection);
 router.post(
   "/",
   authorize("admin", "superadmin"),
-  RouterController.createRouter
+  RouterController.createRouter,
 );
 
 // Update router (admin only)
 router.put(
   "/:id",
   authorize("admin", "superadmin"),
-  RouterController.updateRouter
+  RouterController.updateRouter,
 );
 
 // Delete router (admin only)
 router.delete(
   "/:id",
   authorize("admin", "superadmin"),
-  RouterController.deleteRouter
+  RouterController.deleteRouter,
 );
 
 // Test all routers
@@ -49,11 +49,11 @@ router.get("/test-all", authenticate, RouterController.testAllRouters);
 router.post("/test-all", authenticate, RouterController.testAllRouters);
 
 // Test all routers with progress (optional - untuk real-time updates)
-router.get(
-  "/test-all/progress",
-  authenticate,
-  RouterController.testAllRoutersWithProgress
-);
+// router.get(
+//   "/test-all/progress",
+//   authenticate,
+//   RouterController.testAllRoutersWithProgress
+// );
 
 // router.routes.js - tambahkan endpoint test sederhana
 router.get("/test-all/mock", authenticate, (req, res) => {

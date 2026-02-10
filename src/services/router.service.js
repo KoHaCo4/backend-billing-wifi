@@ -2,7 +2,7 @@ const db = require("../config/database");
 const logger = require("../utils/logger");
 
 class RouterService {
-  // Create router
+  // Create router dengan admin_id
   static async createRouter(data, adminId) {
     const connection = await db.getConnection();
 
@@ -11,8 +11,8 @@ class RouterService {
 
       const [result] = await connection.query(
         `INSERT INTO routers 
-         (name, ip_address, username, password, port, api_port, status) 
-         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+         (name, ip_address, username, password, port, api_port, status, admin_id, is_shared, shared_with) 
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           data.name,
           data.ip_address,
@@ -21,7 +21,10 @@ class RouterService {
           data.port || 8728,
           data.api_port || 8728,
           data.status || "active",
-        ]
+          adminId, // Tambahkan admin_id
+          data.is_shared || 0,
+          data.shared_with ? JSON.stringify(data.shared_with) : null,
+        ],
       );
 
       const routerId = result.insertId;
@@ -37,7 +40,7 @@ class RouterService {
           `Router created: ${data.name} (${data.ip_address})`,
           "admin",
           adminId,
-        ]
+        ],
       );
 
       await connection.commit();
@@ -45,6 +48,7 @@ class RouterService {
       return {
         id: routerId,
         ...data,
+        admin_id: adminId,
       };
     } catch (error) {
       await connection.rollback();
@@ -55,18 +59,31 @@ class RouterService {
     }
   }
 
-  // Get all routers - PERBAIKI: Tampilkan semua status
-  static async getRouters(showInactive = false) {
+  // Get all routers dengan filter multi-user
+  static async getRouters(showInactive = false, adminId = null, role = null) {
     try {
-      let query = "SELECT * FROM routers";
+      let whereClause = "WHERE 1=1";
+      const params = [];
 
-      if (!showInactive) {
-        query += ' WHERE status = "active"';
+      // Filter berdasarkan admin jika bukan superadmin
+      if (adminId && role !== "superadmin") {
+        whereClause += `
+          AND (
+            admin_id = ? 
+            OR (is_shared = 1 AND JSON_CONTAINS(shared_with, CAST(? AS JSON)))
+          )
+        `;
+        params.push(adminId, JSON.stringify([adminId]));
       }
 
-      query += " ORDER BY name";
+      if (!showInactive) {
+        whereClause += ' AND status = "active"';
+      }
 
-      const [routers] = await db.query(query);
+      whereClause += " ORDER BY name";
+
+      const query = `SELECT * FROM routers ${whereClause}`;
+      const [routers] = await db.query(query, params);
       return routers;
     } catch (error) {
       logger.error("Get routers error:", error);
@@ -74,28 +91,27 @@ class RouterService {
     }
   }
 
-  // Get all routers untuk filter (admin panel) - TAMBAHKAN
-  static async getAllRouters(showInactive = true) {
+  // Get router by ID dengan authorization
+  static async getRouterById(id, adminId = null, role = null) {
     try {
-      let query = "SELECT * FROM routers ORDER BY status DESC, name";
-      const [routers] = await db.query(query);
-      return routers;
-    } catch (error) {
-      logger.error("Get all routers error:", error);
-      throw error;
-    }
-  }
+      let query = "SELECT * FROM routers WHERE id = ?";
+      const params = [id];
 
-  // Get router by ID - PERBAIKI: Tidak filter status
-  static async getRouterById(id) {
-    try {
-      const [routers] = await db.query(
-        "SELECT * FROM routers WHERE id = ?", // HAPUS FILTER STATUS
-        [id]
-      );
+      // Tambahkan filter authorization jika bukan superadmin
+      if (adminId && role !== "superadmin") {
+        query += `
+          AND (
+            admin_id = ? 
+            OR (is_shared = 1 AND JSON_CONTAINS(shared_with, CAST(? AS JSON)))
+          )
+        `;
+        params.push(adminId, JSON.stringify([adminId]));
+      }
+
+      const [routers] = await db.query(query, params);
 
       if (routers.length === 0) {
-        throw new Error("Router not found");
+        return null; // Return null jika tidak ditemukan atau tidak ada akses
       }
 
       return routers[0];
@@ -105,21 +121,31 @@ class RouterService {
     }
   }
 
-  // Update router
-  static async updateRouter(id, data, adminId) {
+  // Update router dengan authorization
+  static async updateRouter(id, data, adminId, role) {
     const connection = await db.getConnection();
 
     try {
       await connection.beginTransaction();
 
-      // Check if router exists
-      const [routers] = await connection.query(
-        "SELECT * FROM routers WHERE id = ?",
-        [id]
-      );
+      // Check if router exists and admin has access
+      let query = "SELECT * FROM routers WHERE id = ?";
+      const params = [id];
+
+      if (role !== "superadmin") {
+        query += `
+          AND (
+            admin_id = ? 
+            OR (is_shared = 1 AND JSON_CONTAINS(shared_with, CAST(? AS JSON)))
+          )
+        `;
+        params.push(adminId, JSON.stringify([adminId]));
+      }
+
+      const [routers] = await connection.query(query, params);
 
       if (routers.length === 0) {
-        throw new Error("Router not found");
+        throw new Error("Router not found or access denied");
       }
 
       const currentRouter = routers[0];
@@ -139,12 +165,12 @@ class RouterService {
           data.name,
           data.ip_address,
           data.username,
-          passwordToUpdate, // Gunakan password yang sudah di-handle
+          passwordToUpdate,
           data.port || 8728,
           data.api_port || 8728,
           data.status || "active",
           id,
-        ]
+        ],
       );
 
       // Log activity
@@ -158,7 +184,7 @@ class RouterService {
           `Router updated: ${data.name}`,
           "admin",
           adminId,
-        ]
+        ],
       );
 
       await connection.commit();
@@ -171,7 +197,6 @@ class RouterService {
         port: data.port,
         api_port: data.api_port,
         status: data.status,
-        // Jangan return password
       };
     } catch (error) {
       await connection.rollback();
@@ -182,8 +207,8 @@ class RouterService {
     }
   }
 
-  // Delete router (soft delete)
-  static async deleteRouter(id, adminId) {
+  // Delete router (soft delete) dengan authorization
+  static async deleteRouter(id, adminId, role) {
     const connection = await db.getConnection();
 
     try {
@@ -192,24 +217,40 @@ class RouterService {
       // Check if router has customers
       const [customers] = await connection.query(
         'SELECT COUNT(*) as count FROM customers WHERE router_id = ? AND status = "active"',
-        [id]
+        [id],
       );
 
       if (customers[0].count > 0) {
         throw new Error("Cannot delete router with active customers");
       }
 
+      // Check access
+      if (role !== "superadmin") {
+        const [routers] = await connection.query(
+          "SELECT admin_id FROM routers WHERE id = ?",
+          [id],
+        );
+
+        if (routers.length === 0) {
+          throw new Error("Router not found");
+        }
+
+        if (routers[0].admin_id !== adminId) {
+          throw new Error("Access denied to delete this router");
+        }
+      }
+
       // Soft delete (update status to inactive)
       await connection.query(
         'UPDATE routers SET status = "inactive" WHERE id = ?',
-        [id]
+        [id],
       );
 
       // Log activity
       await connection.query(
         `INSERT INTO logs (action, entity, entity_id, description, source, admin_id) 
          VALUES (?, ?, ?, ?, ?, ?)`,
-        ["delete_router", "router", id, "Router deleted", "admin", adminId]
+        ["delete_router", "router", id, "Router deleted", "admin", adminId],
       );
 
       await connection.commit();
@@ -224,38 +265,28 @@ class RouterService {
     }
   }
 
-  // Test router connection
-  static async testConnection(routerId) {
+  // Cek apakah admin bisa mengakses router
+  static async canAccessRouter(routerId, adminId, role) {
     try {
-      const router = await this.getRouterById(routerId);
+      if (role === "superadmin") {
+        return true;
+      }
 
-      // Simple ping test (kita akan implementasi Mikrotik test nanti)
-      const isReachable = await this.pingRouter(router.ip_address);
+      const [routers] = await db.query(
+        `SELECT id FROM routers 
+         WHERE id = ? 
+         AND (
+           admin_id = ? 
+           OR (is_shared = 1 AND JSON_CONTAINS(shared_with, CAST(? AS JSON)))
+         )`,
+        [routerId, adminId, JSON.stringify([adminId])],
+      );
 
-      return {
-        router,
-        reachable: isReachable,
-        message: isReachable
-          ? "Router is reachable"
-          : "Router is not reachable",
-      };
+      return routers.length > 0;
     } catch (error) {
-      logger.error("Test connection error:", error);
-      throw error;
+      logger.error("Check router access error:", error);
+      return false;
     }
-  }
-
-  // Simple ping function
-  static async pingRouter(ip) {
-    return new Promise((resolve) => {
-      const { exec } = require("child_process");
-      const command =
-        process.platform === "win32" ? `ping -n 1 ${ip}` : `ping -c 1 ${ip}`;
-
-      exec(command, (error) => {
-        resolve(!error);
-      });
-    });
   }
 }
 

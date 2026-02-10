@@ -1,19 +1,36 @@
-// server.js - PERBAIKAN ROUTING
 require("dotenv").config();
 const app = require("./src/app");
 const scheduler = require("./src/jobs/scheduler");
 const { authenticate } = require("./src/middleware/auth");
+const http = require("http");
 
-const PORT = process.env.PORT || 8080;
+// Import WebSocket
+const { wss } = require("./src/websocket/traffic.websocket");
+
+// Import Traffic Monitor Job
+const trafficMonitorJob = require("./src/jobs/traffic-monitor.job");
+
+const PORT = process.env.PORT || 5555;
+
+// Create HTTP server
+const server = http.createServer(app);
+
+// Attach WebSocket to the same server
+server.on("upgrade", (request, socket, head) => {
+  console.log("🔄 HTTP upgrade request for WebSocket");
+
+  // Handle WebSocket upgrade
+  wss.handleUpgrade(request, socket, head, (ws) => {
+    wss.emit("connection", ws, request);
+  });
+});
 
 process.on("unhandledRejection", (reason, promise) => {
   console.error("🚨 Unhandled Rejection at:", promise, "reason:", reason);
-  // Jangan exit process, log saja
 });
 
 process.on("uncaughtException", (error) => {
   console.error("🚨 Uncaught Exception:", error);
-  // Jangan exit process, log saja
 });
 
 // ===========================================
@@ -43,69 +60,18 @@ app.get("/api/jobs/status", (req, res) => {
   }
 });
 
-// ✅ Endpoint untuk manual trigger jobs (PROTECTED)
-// app.post("/api/jobs/run/:jobName", authenticate, (req, res) => {
-//   try {
-//     const { jobName } = req.params;
-//     const validJobs = [
-//       "autoSuspend",
-//       "checkExpiring",
-//       "checkOverdue",
-//       "generateInvoices",
-//       "cleanupLogs",
-//     ];
-
-//     if (!validJobs.includes(jobName)) {
-//       return res.status(400).json({
-//         success: false,
-//         message: `Invalid job name. Valid jobs: ${validJobs.join(", ")}`,
-//       });
-//     }
-
-//     console.log(`🔧 Manual job trigger: ${jobName} by user ${req.user.id}`);
-
-//     // Jalankan job secara async
-//     if (scheduler.runJobManually) {
-//       scheduler
-//         .runJobManually(jobName)
-//         .then((result) => {
-//           res.json({
-//             success: true,
-//             message: `Job ${jobName} started successfully`,
-//             data: result,
-//           });
-//         })
-//         .catch((error) => {
-//           console.error(`Job ${jobName} failed:`, error);
-//           res.status(500).json({
-//             success: false,
-//             message: `Failed to run job ${jobName}: ${error.message}`,
-//           });
-//         });
-//     } else {
-//       // Fallback jika scheduler tidak punya method runJobManually
-//       res.status(501).json({
-//         success: false,
-//         message: `Scheduler doesn't support manual execution`,
-//       });
-//     }
-//   } catch (error) {
-//     console.error("Error in manual job trigger:", error);
-//     res.status(500).json({
-//       success: false,
-//       message: "Internal server error",
-//     });
-//   }
-// });
+// Start traffic monitor
+trafficMonitorJob.start();
 
 // ===========================================
 // START SERVER
 // ===========================================
 
 // Start the server
-const server = app.listen(PORT, () => {
+server.listen(PORT, () => {
   console.log(`
 🚀 Server running on port ${PORT}
+🔌 WebSocket ready at ws://localhost:${PORT}
 📁 Environment: ${process.env.NODE_ENV}
 📅 Date: ${new Date().toLocaleString("id-ID")}
 ⏰ Scheduler: ${
@@ -123,7 +89,7 @@ const server = app.listen(PORT, () => {
       setTimeout(() => {
         const status = scheduler.getStatus();
         console.log(
-          `✅ Scheduler started: ${status.isRunning ? "RUNNING" : "STOPPED"}`
+          `✅ Scheduler started: ${status.isRunning ? "RUNNING" : "STOPPED"}`,
         );
         console.log(`📊 Active jobs: ${status.jobCount}`);
       }, 1000);
@@ -153,5 +119,13 @@ process.on("SIGINT", () => {
     process.exit(0);
   });
 });
+
+// Export functions untuk digunakan di job
+global.broadcastTrafficUpdate =
+  require("./src/websocket/traffic.websocket").broadcastTrafficUpdate;
+global.broadcastCustomerUpdate =
+  require("./src/websocket/traffic.websocket").broadcastCustomerUpdate;
+global.broadcastSystemAlert =
+  require("./src/websocket/traffic.websocket").broadcastSystemAlert;
 
 module.exports = server;

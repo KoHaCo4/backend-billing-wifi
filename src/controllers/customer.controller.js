@@ -17,9 +17,12 @@ class CustomerController {
         password_pppoe,
         expired_at,
         status,
+        is_shared = false,
+        shared_with = [],
       } = req.body;
 
-      const adminId = req.user ? req.user.id : 1;
+      const adminId = req.user.id;
+      const role = req.user.role;
 
       // Validasi field wajib
       if (!name || !router_id || !package_id) {
@@ -65,8 +68,11 @@ class CustomerController {
           password_pppoe,
           expired_at,
           status: status || "active",
+          is_shared,
+          shared_with,
         },
         adminId,
+        role,
       );
 
       console.log("✅ Customer created successfully:", customer.id);
@@ -79,16 +85,19 @@ class CustomerController {
     } catch (error) {
       console.error("❌ Create customer error:", error.message);
 
-      // Handle specific MikroTik errors
+      // Handle specific errors
       let errorMessage = error.message;
       let statusCode = 500;
 
-      if (
+      if (error.message.includes("already exists")) {
+        errorMessage = "Username PPPoE sudah digunakan";
+        statusCode = 400;
+      } else if (
         error.message.includes("MikroTik") ||
         error.message.includes("router")
       ) {
         errorMessage = `Gagal terhubung ke router: ${error.message}`;
-        statusCode = 503; // Service Unavailable
+        statusCode = 503;
       }
 
       res.status(statusCode).json({
@@ -99,16 +108,24 @@ class CustomerController {
     }
   }
 
-  // Get all customers
+  // Get all customers dengan filter multi-user
   static async getCustomers(req, res) {
     try {
       const { page = 1, limit = 20, status, router_id, search } = req.query;
+      const adminId = req.user.id;
+      const role = req.user.role;
 
-      const result = await CustomerService.getCustomers(page, limit, {
-        status,
-        router_id,
-        search,
-      });
+      const result = await CustomerService.getCustomers(
+        page,
+        limit,
+        {
+          status,
+          router_id,
+          search,
+        },
+        adminId,
+        role,
+      );
 
       res.json({
         success: true,
@@ -127,20 +144,23 @@ class CustomerController {
   static async getCustomer(req, res) {
     try {
       const { id } = req.params;
+      const adminId = req.user.id;
+      const role = req.user.role;
 
-      const customer = await CustomerService.getCustomerById(id);
+      const customer = await CustomerService.getCustomerById(id, adminId, role);
+
+      if (!customer) {
+        return res.status(404).json({
+          success: false,
+          message: "Customer not found or access denied",
+        });
+      }
 
       res.json({
         success: true,
         data: customer,
       });
     } catch (error) {
-      if (error.message === "Customer not found") {
-        return res.status(404).json({
-          success: false,
-          message: error.message,
-        });
-      }
       res.status(500).json({
         success: false,
         message: error.message,
@@ -163,11 +183,13 @@ class CustomerController {
         password_pppoe,
         expired_at,
         status,
+        is_shared,
+        shared_with,
       } = req.body;
 
       const adminId = req.user.id;
+      const role = req.user.role;
 
-      // DEBUG: Log semua data yang diterima
       console.log("🔄 UPDATE CUSTOMER REQUEST:", {
         id,
         name,
@@ -182,7 +204,10 @@ class CustomerController {
           : "undefined/empty",
         expired_at,
         status,
+        is_shared,
+        shared_with,
         adminId,
+        role,
       });
 
       // Validasi data yang diperlukan
@@ -223,8 +248,11 @@ class CustomerController {
           password_pppoe: password_pppoe || undefined,
           expired_at,
           status: status || "active",
+          is_shared,
+          shared_with,
         },
         adminId,
+        role,
       );
 
       console.log("✅ UPDATE CUSTOMER SUCCESS:", { id });
@@ -236,12 +264,14 @@ class CustomerController {
       });
     } catch (error) {
       console.error("❌ UPDATE CUSTOMER ERROR:", error);
-      console.error("❌ Error stack:", error.stack);
 
-      if (error.message === "Customer not found") {
+      if (
+        error.message.includes("not found") ||
+        error.message.includes("access denied")
+      ) {
         return res.status(404).json({
           success: false,
-          message: error.message,
+          message: "Customer not found or access denied",
         });
       }
 
@@ -264,12 +294,13 @@ class CustomerController {
     try {
       const { id } = req.params;
       const adminId = req.user.id;
+      const role = req.user.role;
 
       console.log(
-        `🔍 Attempting to delete customer ID: ${id}, adminId: ${adminId}`,
+        `🔍 Attempting to delete customer ID: ${id}, adminId: ${adminId}, role: ${role}`,
       );
 
-      const result = await CustomerService.deleteCustomer(id, adminId);
+      const result = await CustomerService.deleteCustomer(id, adminId, role);
 
       console.log(`✅ Delete successful for customer ID: ${id}`);
 
@@ -280,12 +311,14 @@ class CustomerController {
       });
     } catch (error) {
       console.error(`❌ Delete customer error:`, error);
-      console.error(`❌ Error stack:`, error.stack);
 
-      if (error.message === "Customer not found") {
+      if (
+        error.message.includes("not found") ||
+        error.message.includes("access denied")
+      ) {
         return res.status(404).json({
           success: false,
-          message: error.message,
+          message: "Customer not found or access denied",
         });
       }
 
@@ -297,12 +330,57 @@ class CustomerController {
     }
   }
 
+  // Share customer dengan admin lain
+  static async shareCustomer(req, res) {
+    try {
+      const { id } = req.params;
+      const { admin_ids } = req.body; // Array of admin IDs
+      const adminId = req.user.id;
+      const role = req.user.role;
+
+      if (!Array.isArray(admin_ids)) {
+        return res.status(400).json({
+          success: false,
+          message: "admin_ids harus berupa array",
+        });
+      }
+
+      const result = await CustomerService.shareCustomer(
+        id,
+        adminId,
+        role,
+        admin_ids,
+      );
+
+      res.json({
+        success: true,
+        message: "Customer shared successfully",
+        data: result,
+      });
+    } catch (error) {
+      console.error("❌ Share customer error:", error);
+
+      if (error.message.includes("not found")) {
+        return res.status(404).json({
+          success: false,
+          message: error.message,
+        });
+      }
+
+      res.status(500).json({
+        success: false,
+        message: error.message,
+      });
+    }
+  }
+
   // Deactivate customer
   static async deactivateCustomer(req, res) {
     try {
       const { id } = req.params;
       const { reason } = req.body;
       const adminId = req.user.id;
+      const role = req.user.role;
 
       console.log(
         `🚫 Deactivate customer request for ID: ${id}, Reason: ${reason}`,
@@ -311,6 +389,7 @@ class CustomerController {
       const result = await CustomerService.deactivateCustomer(
         id,
         adminId,
+        role,
         reason,
       );
 
@@ -329,6 +408,8 @@ class CustomerController {
         statusCode = 404;
       } else if (error.message.includes("Cannot deactivate customer")) {
         statusCode = 400;
+      } else if (error.message.includes("access denied")) {
+        statusCode = 403;
       }
 
       res.status(statusCode).json({
@@ -340,32 +421,28 @@ class CustomerController {
     }
   }
 
-  // Extend customer package
-  static async extendCustomer(req, res) {
+  // Activate customer
+  static async activateCustomer(req, res) {
     try {
       const { id } = req.params;
-      const { days } = req.body;
       const adminId = req.user.id;
+      const role = req.user.role;
 
-      if (days && days <= 0) {
-        return res.status(400).json({
-          success: false,
-          message: "Days must be greater than 0",
-        });
-      }
-
-      const result = await CustomerService.extendCustomer(id, days, adminId);
+      const result = await CustomerService.activateCustomer(id, adminId, role);
 
       res.json({
         success: true,
-        message: "Customer extended successfully",
+        message: "Customer activated successfully",
         data: result,
       });
     } catch (error) {
-      if (error.message === "Customer not found") {
+      if (
+        error.message === "Customer not found" ||
+        error.message.includes("access denied")
+      ) {
         return res.status(404).json({
           success: false,
-          message: error.message,
+          message: "Customer not found or access denied",
         });
       }
       res.status(500).json({
@@ -375,20 +452,66 @@ class CustomerController {
     }
   }
 
-  // Suspend customer - UPDATE
+  // Extend customer package
+  static async extendCustomer(req, res) {
+    try {
+      const { id } = req.params;
+      const { days } = req.body;
+      const adminId = req.user.id;
+      const role = req.user.role;
+
+      if (days && days <= 0) {
+        return res.status(400).json({
+          success: false,
+          message: "Days must be greater than 0",
+        });
+      }
+
+      const result = await CustomerService.extendCustomer(
+        id,
+        days,
+        adminId,
+        role,
+      );
+
+      res.json({
+        success: true,
+        message: "Customer extended successfully",
+        data: result,
+      });
+    } catch (error) {
+      if (
+        error.message === "Customer not found" ||
+        error.message.includes("access denied")
+      ) {
+        return res.status(404).json({
+          success: false,
+          message: "Customer not found or access denied",
+        });
+      }
+      res.status(500).json({
+        success: false,
+        message: error.message,
+      });
+    }
+  }
+
+  // Suspend customer
   static async suspendCustomer(req, res) {
     try {
       const { id } = req.params;
       const { reason } = req.body || {};
       const adminId = req.user.id;
+      const role = req.user.role;
 
       console.log(
         `🚫 Suspend customer ${id}, reason: ${reason || "Not specified"}`,
       );
 
-      const result = await SuspensionService.suspendCustomer(
+      const result = await CustomerService.suspendCustomer(
         id,
         adminId,
+        role,
         reason || "Suspended by admin",
       );
 
@@ -400,10 +523,13 @@ class CustomerController {
     } catch (error) {
       console.error("❌ Suspend customer error:", error);
 
-      if (error.message === "Customer not found") {
+      if (
+        error.message === "Customer not found" ||
+        error.message.includes("access denied")
+      ) {
         return res.status(404).json({
           success: false,
-          message: error.message,
+          message: "Customer not found or access denied",
         });
       }
 
@@ -421,87 +547,40 @@ class CustomerController {
     }
   }
 
-  // Activate customer - UPDATE
-  static async activateCustomer(req, res) {
-    try {
-      const { id } = req.params;
-      const { reason } = req.body || {};
-      const adminId = req.user.id;
-
-      console.log(
-        `🔄 Activate customer ${id}, reason: ${reason || "Not specified"}`,
-      );
-
-      const result = await SuspensionService.reactivateCustomer(
-        id,
-        adminId,
-        reason || "Activated by admin",
-      );
-
-      res.json({
-        success: true,
-        message: "Customer activated successfully",
-        data: result,
-      });
-    } catch (error) {
-      console.error("❌ Activate customer error:", error);
-
-      if (error.message === "Customer not found") {
-        return res.status(404).json({
-          success: false,
-          message: error.message,
-        });
-      }
-
-      if (error.message === "Customer is not suspended") {
-        return res.status(400).json({
-          success: false,
-          message: error.message,
-        });
-      }
-
-      res.status(500).json({
-        success: false,
-        message: error.message,
-      });
-    }
-  }
-
-  // Activate customer
-  static async activateCustomer(req, res) {
-    try {
-      const { id } = req.params;
-      const adminId = req.user.id;
-
-      const result = await CustomerService.activateCustomer(id, adminId);
-
-      res.json({
-        success: true,
-        message: "Customer activated successfully",
-        data: result,
-      });
-    } catch (error) {
-      if (error.message === "Customer not found") {
-        return res.status(404).json({
-          success: false,
-          message: error.message,
-        });
-      }
-      res.status(500).json({
-        success: false,
-        message: error.message,
-      });
-    }
-  }
-
   // Get statistics
   static async getStatistics(req, res) {
     try {
-      const stats = await CustomerService.getStatistics();
+      const adminId = req.user.id;
+      const role = req.user.role;
+
+      const stats = await CustomerService.getStatistics(adminId, role);
 
       res.json({
         success: true,
         data: stats,
+      });
+    } catch (error) {
+      res.status(500).json({
+        success: false,
+        message: error.message,
+      });
+    }
+  }
+
+  // Get recent customers (untuk dashboard)
+  static async getRecentCustomers(req, res) {
+    try {
+      const adminId = req.user.id;
+      const { limit = 10 } = req.query;
+
+      const customers = await CustomerService.getRecentCustomers(
+        adminId,
+        limit,
+      );
+
+      res.json({
+        success: true,
+        data: customers,
       });
     } catch (error) {
       res.status(500).json({
