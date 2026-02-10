@@ -33,8 +33,8 @@ const app = express();
 app.use(helmet());
 
 const allowedOrigins = [
-  "https://frontend-billing-wifi.vercel.app", // DOMAIN VERCEL ANDA
-  "https://*.vercel.app", // Allow semua subdomain Vercel
+  /\.vercel\.app$/, // Izinkan semua subdomain vercel.app
+  /\.vercel\.app:(\d+)$/, // Izinkan dengan port
   "http://localhost:3000",
   "http://localhost:8080",
   "https://billing.fstnews.my.id",
